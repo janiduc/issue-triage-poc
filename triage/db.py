@@ -2,6 +2,7 @@
 import csv
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from werkzeug.security import generate_password_hash
@@ -125,11 +126,23 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+@contextmanager
 def connect():
+    """Open a connection, commit (or roll back) on exit, and always close it.
+
+    sqlite3's own context manager ends the transaction but leaves the connection open, which
+    leaks a file handle per call. On Windows that handle locks the database file, so temporary
+    test databases cannot be deleted. The inner `with conn` keeps the commit/rollback
+    behaviour unchanged; the `finally` adds the close.
+    """
     conn = sqlite3.connect(config.db_path())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db(seed_csv=config.SEED_CSV):
