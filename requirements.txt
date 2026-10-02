@@ -1,0 +1,7 @@
+flask>=3.0
+requests>=2.31
+scikit-learn>=1.3
+numpy>=1.24
+# Optional but recommended: semantic similarity with local embeddings.
+# Without it the app falls back to TF-IDF similarity automatically.
+sentence-transformers>=2.7

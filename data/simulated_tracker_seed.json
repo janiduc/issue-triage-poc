@@ -1,0 +1,21 @@
+{
+  "note": "Simulated issue tracker used for offline demos. Not real customer data.",
+  "issues": [
+    {"key": "SIM-1", "title": "Checkout hangs after entering card details",
+     "body": "Since this morning, customers who enter card details at checkout see a spinner forever. Several customers have phoned about it. Card numbers like 4111 1111 1111 1111 are being used in testing.",
+     "reporter": "store-owner-bluefin", "state": "open", "labels": [], "priority": null,
+     "assignee": null, "comments": [], "created_at": "2026-09-28T08:15:00+00:00"},
+    {"key": "SIM-2", "title": "Report export to Excel shows wrong totals",
+     "body": "The Excel export of the monthly sales report includes refunded orders in the totals, so the numbers do not match the dashboard.",
+     "reporter": "finance-team", "state": "open", "labels": [], "priority": null,
+     "assignee": null, "comments": [], "created_at": "2026-09-28T09:40:00+00:00"},
+    {"key": "SIM-3", "title": "Error",
+     "body": "Got an error.",
+     "reporter": "new-client-oak", "state": "open", "labels": [], "priority": null,
+     "assignee": null, "comments": [], "created_at": "2026-09-28T10:05:00+00:00"},
+    {"key": "SIM-4", "title": "Allow customers to save favourite products",
+     "body": "Our customers would like a wishlist so they can save products and buy them later.",
+     "reporter": "store-owner-bluefin", "state": "open", "labels": [], "priority": null,
+     "assignee": null, "comments": [], "created_at": "2026-09-28T11:20:00+00:00"}
+  ]
+}

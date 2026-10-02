@@ -1,0 +1,718 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Issue triage desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #eef2f1; --panel: #ffffff; --ink: #17212b; --muted: #5b6770; --rule: #c5cfcc;
+    --accent: #0e5c63; --accent-ink: #ffffff;
+    --critical: #b3261e; --high: #c05a00; --medium: #8a6d00; --low: #4f6272;
+    --warn-bg: #fff4d6; --warn-ink: #5c4500; --ok: #1f6b3a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #121a1f; --panel: #1b252c; --ink: #e6ecea; --muted: #9aa8ae; --rule: #33424b;
+      --accent: #5fb3b9; --accent-ink: #0b1519;
+      --critical: #ff6b61; --high: #ff9d4d; --medium: #e0c34a; --low: #9db2c2;
+      --warn-bg: #3a3116; --warn-ink: #f3dc95; --ok: #7fd49b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink);
+    font: 16px/1.5 "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 1.35rem; margin: 0; }
+  h2 { font-size: 1.1rem; margin: 0 0 12px; }
+  h3 { font-size: 1rem; margin: 18px 0 6px; }
+  [hidden] { display: none !important; }
+
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px;
+    padding: 14px 28px; border-bottom: 1px solid var(--rule); background: var(--panel); }
+  nav { display: flex; gap: 4px; flex-wrap: wrap; }
+  nav button { background: transparent; color: var(--ink); border-color: transparent; font-weight: 400; }
+  nav button[aria-current="page"] { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .who { margin-left: auto; display: flex; gap: 12px; align-items: center; color: var(--muted); }
+  .who b { color: var(--ink); }
+  .role-badge { border: 1px solid var(--rule); border-radius: 999px; padding: 1px 10px; font-size: .85rem; }
+
+  main { padding: 24px 28px; }
+  .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 24px; align-items: start; }
+  .narrow { max-width: 680px; }
+  @media (max-width: 860px) { .split { grid-template-columns: 1fr; } main, header { padding: 14px; } }
+  section { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 20px; }
+  section + section { margin-top: 24px; }
+  .split > section { margin-top: 0; }
+
+  label { display: block; font-weight: 700; margin: 12px 0 4px; font-size: .95rem; }
+  label.inline { display: inline-flex; gap: 6px; align-items: center; font-weight: 400; margin: 4px 12px 4px 0; }
+  input, textarea, select { width: 100%; font: inherit; color: var(--ink); background: var(--paper);
+    border: 1px solid var(--rule); border-radius: 4px; padding: 8px 10px; }
+  input[type="checkbox"], input[type="radio"] { width: auto; margin: 0; }
+  textarea { min-height: 110px; resize: vertical; }
+  button { font: inherit; font-weight: 700; border-radius: 4px; padding: 7px 14px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .55; cursor: wait; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; align-items: center; }
+  .error { color: var(--critical); margin-top: 10px; font-weight: 700; }
+  .success { color: var(--ok); margin-top: 10px; font-weight: 700; }
+  .hint { color: var(--muted); font-size: .9rem; }
+  .empty { color: var(--muted); padding: 12px 0; }
+
+  /* Triage tag: priority is carried by a thick coloured edge, like a physical triage label. */
+  .tag { border-left: 10px solid var(--rule); padding: 12px 14px; background: var(--paper); border-radius: 0 4px 4px 0; }
+  .tag.critical { border-color: var(--critical); } .tag.high { border-color: var(--high); }
+  .tag.medium { border-color: var(--medium); } .tag.low { border-color: var(--low); }
+  .prio { font-size: 1.55rem; font-weight: 700; line-height: 1.1; }
+  .prio.critical { color: var(--critical); } .prio.high { color: var(--high); }
+  .prio.medium { color: var(--medium); } .prio.low { color: var(--low); }
+  .facts { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 6px; color: var(--muted); }
+  .facts b { color: var(--ink); }
+  .flags { background: var(--warn-bg); color: var(--warn-ink); border-radius: 4px; padding: 8px 12px; margin-top: 12px; }
+  .flags ul { margin: 4px 0 0; padding-left: 20px; }
+  .rec { border: 1px solid var(--accent); border-radius: 4px; padding: 10px 12px; }
+  .plain { list-style: none; padding: 0; margin: 0; }
+  .plain > li { padding: 8px 0; border-top: 1px solid var(--rule); }
+  .plain > li:first-child { border-top: 0; }
+  .score { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .list { list-style: none; padding: 0; margin: 0; }
+  .list li { margin-bottom: 8px; }
+  .list button.item { all: unset; display: block; width: 100%; box-sizing: border-box; cursor: pointer; }
+  .list .tag { padding: 8px 12px; }
+  .list .title { font-weight: 700; }
+  .list .meta { color: var(--muted); font-size: .9rem; }
+  .list button.item:focus-visible .tag { outline: 3px solid var(--accent); }
+  .list button.item[aria-pressed="true"] .tag { background: var(--panel); box-shadow: inset 0 0 0 1px var(--accent); }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs button[aria-pressed="false"] { background: transparent; color: var(--accent); }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .stat { border-top: 3px solid var(--accent); padding-top: 8px; }
+  .stat .n { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .95rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { color: var(--muted); font-weight: 700; }
+  td select { width: auto; }
+  .status-pill { display: inline-block; border: 1px solid var(--rule); border-radius: 999px; padding: 0 10px; font-size: .85rem; }
+  .status-pill.needs_info { border-color: var(--warn-ink); color: var(--warn-ink); background: var(--warn-bg); }
+  .status-pill.resolved { border-color: var(--ok); color: var(--ok); }
+
+  #login { max-width: 420px; margin: 8vh auto; }
+  .demo-users { margin-top: 18px; }
+  .demo-users button { all: unset; cursor: pointer; color: var(--accent); text-decoration: underline; }
+  details summary { cursor: pointer; color: var(--accent); font-weight: 700; margin-top: 12px; }
+  .plan { border: 2px solid var(--accent); border-radius: 6px; padding: 14px 16px; margin-top: 18px; }
+  .plan h3 { margin-top: 0; }
+  fieldset { border: 0; padding: 0; margin: 12px 0 0; }
+  legend { font-weight: 700; font-size: .95rem; padding: 0; }
+  .pick td:first-child { width: 1%; white-space: nowrap; }
+  .agent-choice { font-size: .85rem; color: var(--accent); font-weight: 700; }
+  .trace { padding-left: 22px; margin: 8px 0 0; }
+  .trace li { margin-bottom: 6px; }
+  .trace code { font-size: .85rem; background: var(--paper); padding: 0 4px; border-radius: 3px; }
+  .ext { display: inline-block; border: 1px solid var(--rule); border-radius: 4px; padding: 0 6px; font-size: .8rem; margin-left: 4px; color: var(--muted); }
+  .sync-ok { color: var(--ok); font-weight: 700; } .sync-failed { color: var(--critical); font-weight: 700; }
+  .sync-pending { color: var(--warn-ink); font-weight: 700; }
+  .labels span { display: inline-block; border: 1px solid var(--rule); border-radius: 999px; padding: 0 8px; margin: 2px 4px 2px 0; font-size: .85rem; }
+  .comments { margin: 6px 0 0; padding-left: 18px; font-size: .9rem; }
+  .inline-input { max-width: 180px; padding: 4px 6px; font-size: .9rem; }
+</style>
+</head>
+<body>
+
+<div id="login" hidden>
+  <section>
+    <h1>Issue triage desk</h1>
+    <p class="hint">Sign in to report issues, triage them, or work on your assignments.</p>
+    <form id="login-form">
+      <label for="l-user">Username</label><input id="l-user" autocomplete="username" required>
+      <label for="l-pass">Password</label><input id="l-pass" type="password" autocomplete="current-password" required>
+      <div class="row"><button type="submit">Sign in</button></div>
+      <div id="login-error" class="error" role="alert"></div>
+    </form>
+    <div class="demo-users hint">
+      Demo accounts (password <b>demo1234</b>):
+      <ul class="plain" id="demo-list"></ul>
+    </div>
+  </section>
+</div>
+
+<div id="shell" hidden>
+  <header>
+    <h1>Issue triage desk</h1>
+    <nav id="nav" aria-label="Main"></nav>
+    <div class="who"><span><b id="who-name"></b></span><span class="role-badge" id="who-role"></span>
+      <button class="secondary" id="logout">Sign out</button></div>
+  </header>
+  <main id="view"></main>
+</div>
+
+<script>
+const $ = (s, root = document) => root.querySelector(s);
+const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+const nice = (v) => (v || "").replace(/_/g, " ");
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pct = (v) => v == null ? "–" : Math.round(v * 100) + "%";
+const when = (iso) => iso ? new Date(iso).toLocaleString() : "";
+
+const DEMO = [["client.acme", "Reporter (external client)"], ["tester", "Reporter (internal tester)"],
+  ["lead", "Triage lead"], ["dev.payments", "Developer, payments and reporting"],
+  ["dev.platform", "Developer, platform and API"], ["admin", "Administrator"]];
+
+// Which screens each role gets. The server enforces the same rules; this only shapes the UI.
+const VIEWS = {
+  reporter:    [["report", "Report an issue"], ["mine", "My issues"]],
+  triage_lead: [["queue", "Triage queue"], ["insights", "Insights"], ["tracker", "Tracker"], ["report", "Report an issue"]],
+  developer:   [["assigned", "My assignments"], ["report", "Report an issue"], ["mine", "Issues I reported"]],
+  admin:       [["users", "Users and roles"], ["settings", "AI settings"], ["tracker", "Tracker"], ["audit", "Activity log"], ["insights", "Insights"]],
+};
+
+const state = { user: null, options: null, view: null, status: "new", selected: null };
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts});
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 401 && path !== "/api/login") { showLogin(); throw new Error("Please sign in again."); }
+  if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
+  return body;
+}
+const post = (path, data, method = "POST") => api(path, {method, body: JSON.stringify(data)});
+
+/* ---------- session ---------- */
+
+function showLogin() {
+  state.user = null;
+  $("#shell").hidden = true; $("#login").hidden = false;
+  $("#demo-list").innerHTML = DEMO.map(([u, label]) =>
+    `<li><button type="button" data-u="${u}">${u}</button> · ${label}</li>`).join("");
+  $$("#demo-list button").forEach((b) => b.onclick = () => { $("#l-user").value = b.dataset.u; $("#l-pass").focus(); });
+  $("#l-user").focus();
+}
+
+async function startApp(user) {
+  state.user = user;
+  state.options = await api("/api/options");
+  $("#login").hidden = true; $("#shell").hidden = false;
+  $("#who-name").textContent = user.display_name;
+  $("#who-role").textContent = state.options.role_labels[user.role];
+  const views = VIEWS[user.role];
+  $("#nav").innerHTML = views.map(([id, label]) => `<button data-view="${id}">${label}</button>`).join("");
+  $$("#nav button").forEach((b) => b.onclick = () => go(b.dataset.view));
+  go(views[0][0]);
+}
+
+$("#login-form").onsubmit = async (e) => {
+  e.preventDefault();
+  $("#login-error").textContent = "";
+  try {
+    const user = await post("/api/login", {username: $("#l-user").value, password: $("#l-pass").value});
+    $("#l-pass").value = "";
+    startApp(user);
+  } catch (err) { $("#login-error").textContent = err.message; }
+};
+$("#logout").onclick = async () => { await post("/api/logout", {}); showLogin(); };
+
+function go(view) {
+  state.view = view; state.selected = null;
+  $$("#nav button").forEach((b) => b.dataset.view === view
+    ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"));
+  ({report: viewReport, mine: () => viewList("mine"), assigned: () => viewList("assigned"),
+    queue: () => viewList("all"), insights: viewInsights, users: viewUsers,
+    settings: viewSettings, audit: viewAudit, tracker: viewTracker})[view]();
+}
+
+/* ---------- report an issue (reporter, developer, lead) ---------- */
+
+function viewReport() {
+  $("#view").innerHTML = `<div class="narrow"><section>
+    <h2>Report an issue</h2>
+    <form id="issue-form" novalidate>
+      <label for="title">Title</label>
+      <input id="title" maxlength="200" placeholder="e.g. Checkout fails when a discount code is applied">
+      <label for="description">What happened?</label>
+      <textarea id="description" maxlength="5000"
+        placeholder="What you did, what you expected, what happened instead, and who is affected."></textarea>
+      <div class="row"><button id="submit" type="submit">Submit issue</button>
+        <span class="hint">Emails, passwords and keys are removed automatically.</span></div>
+      <div id="form-msg" role="alert"></div>
+    </form></section></div>`;
+  $("#issue-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $("#submit"), msg = $("#form-msg");
+    msg.className = ""; msg.textContent = "";
+    btn.disabled = true; btn.textContent = "Submitting…";
+    try {
+      const issue = await post("/api/issues", {title: $("#title").value, description: $("#description").value});
+      e.target.reset();
+      msg.className = "success";
+      msg.textContent = `Issue #${issue.id} submitted. You can follow its progress under ${
+        state.user.role === "triage_lead" ? "Triage queue" : state.user.role === "developer" ? "Issues I reported" : "My issues"}.`;
+    } catch (err) { msg.className = "error"; msg.textContent = err.message; }
+    finally { btn.disabled = false; btn.textContent = "Submit issue"; }
+  };
+}
+
+/* ---------- issue lists ---------- */
+
+const EMPTY = {
+  mine: "You haven't reported any issues yet.",
+  assigned: "Nothing assigned to you right now.",
+  new: "No issues waiting for triage.", needs_info: "No issues waiting on reporters.",
+  assigned_q: "No issues currently with developers.", resolved: "No resolved issues yet.",
+};
+
+async function viewList(scope) {
+  const isQueue = scope === "all";
+  const title = {mine: state.view === "mine" && state.user.role === "developer" ? "Issues I reported" : "My issues",
+                 assigned: "My assignments", all: "Triage queue"}[scope];
+  $("#view").innerHTML = `<div class="split">
+    <section><h2>${title}</h2>
+      ${isQueue ? `<div class="row" id="q-sync" style="margin:0 0 10px" hidden></div>
+      <div id="q-metrics" class="hint" style="margin-bottom:10px"></div>
+      <div class="tabs" role="group" aria-label="Filter by status">
+        ${[["new","Awaiting triage"],["needs_info","Waiting on reporter"],["assigned","With developers"],["resolved","Resolved"]]
+          .map(([s,l]) => `<button data-status="${s}" aria-pressed="${s === state.status}">${l}</button>`).join("")}
+      </div>` : ""}
+      <ul class="list" id="list"></ul></section>
+    <section id="detail"><p class="empty">Select an issue to see its details.</p></section></div>`;
+  if (isQueue) {
+    $$(".tabs button").forEach((b) => b.onclick = () => { state.status = b.dataset.status; viewList(scope); });
+    api("/api/integration").then((t) => {
+      if (!t.configured) return;
+      $("#q-sync").hidden = false;
+      $("#q-sync").innerHTML = `<button class="secondary" id="sync-now">Import from ${esc(t.label)}</button>
+        <span class="hint" id="sync-msg">${t.last_sync ? "Last sync " + when(t.last_sync) : "Not synced yet"}${t.pending_writes ? ` · ${t.pending_writes} update(s) waiting to be sent` : ""}</span>`;
+      $("#sync-now").onclick = () => runSync($("#sync-now"), $("#sync-msg"), () => viewList(scope));
+    }).catch(() => {});
+    api("/api/metrics").then((m) => { $("#q-metrics").textContent =
+      `${m.by_status.new} awaiting triage · ${m.reviewed} reviewed · AI priority agreement ${pct(m.agreement.priority)} · backup classifier used ${pct(m.fallback_rate)}`; }).catch(() => {});
+  }
+  const params = new URLSearchParams({scope});
+  if (isQueue) params.set("status", state.status);
+  try {
+    const issues = await api(`/api/issues?${params}`);
+    const key = isQueue ? (state.status === "assigned" ? "assigned_q" : state.status) : scope;
+    $("#list").innerHTML = issues.length ? issues.map((i) => listItem(i, scope)).join("")
+      : `<li class="empty">${EMPTY[key]}</li>`;
+    $$("#list button.item").forEach((b) => b.onclick = () => openIssue(+b.dataset.id));
+    if (state.selected) openIssue(state.selected);
+  } catch (err) { $("#list").innerHTML = `<li class="error">${esc(err.message)}</li>`; }
+}
+
+function listItem(i, scope) {
+  const p = i.priority || i.suggestion?.priority || "";
+  let meta;
+  if (scope === "mine") meta = `<span class="status-pill ${i.status}">${esc(i.status_label)}</span>`;
+  else meta = `${nice(p)} · ${nice(i.final?.type || i.suggestion.type)} · ${nice(i.final?.module || i.suggestion.module)}
+    ${scope === "all" && i.assignee_name ? ` · ${esc(i.assignee_name)}` : ""}
+    ${i.duplicate_of ? ` · possible duplicate of #${i.duplicate_of}` : ""}
+    ${i.suggestion.source === "fallback" ? " · backup classifier" : ""}`;
+  return `<li><button class="item" data-id="${i.id}" aria-pressed="${i.id === state.selected}">
+    <div class="tag ${scope === "mine" ? (i.priority || "") : p}"><div class="title">#${i.id} ${esc(i.title)}${i.external_key ? `<span class="ext">${esc(i.external_key)}</span>` : ""}${i.sync_status === "failed" ? `<span class="ext sync-failed">sync failed</span>` : ""}</div>
+    <div class="meta">${meta}</div></div></button></li>`;
+}
+
+async function openIssue(id) {
+  state.selected = id;
+  $$("#list button.item").forEach((b) => b.setAttribute("aria-pressed", +b.dataset.id === id));
+  try {
+    const i = await api(`/api/issues/${id}`);
+    $("#detail").innerHTML = i.suggestion ? fullDetail(i) : reporterDetail(i);
+    wireDetail(i);
+  } catch (err) { $("#detail").innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+}
+
+/* ---------- reporter's view of an issue: status and outcome only ---------- */
+
+function reporterDetail(i) {
+  return `<h2>#${i.id} ${esc(i.title)}</h2>
+    <p><span class="status-pill ${i.status}">${esc(i.status_label)}</span>
+      ${i.priority ? ` <span class="hint">Priority: <b>${nice(i.priority)}</b></span>` : ""}</p>
+    ${i.status === "needs_info" ? `<div class="flags"><b>The support team needs more information</b>
+      <p style="margin:4px 0 0">${esc(i.info_request)}</p></div>
+      <label for="info">Your answer</label><textarea id="info"></textarea>
+      <div class="row"><button id="send-info">Send information</button></div>` : ""}
+    ${i.reporter_update && i.status !== "needs_info" ? `<h3>Update from the team</h3><p>${esc(i.reporter_update)}</p>` : ""}
+    ${i.status === "resolved" && i.resolution ? `<h3>How it was resolved</h3><p>${esc(i.resolution)}</p>` : ""}
+    <h3>What you reported</h3><p style="white-space:pre-wrap">${esc(i.description)}</p>
+    <p class="hint">Submitted ${when(i.created_at)}</p>
+    <div id="detail-msg" role="alert"></div>`;
+}
+
+/* ---------- lead / developer view: AI suggestion and actions ---------- */
+
+function selectHtml(id, values, current, labels = {}) {
+  return `<select id="${id}">${values.map((v) => `<option value="${v}" ${String(v) === String(current) ? "selected" : ""}>${esc(labels[v] || nice(v))}</option>`).join("")}</select>`;
+}
+
+function trackerLine(i) {
+  if (!i.tracker_label) return "";
+  const url = /^https?:\/\//.test(i.external_url || "") ? i.external_url : null;
+  const ref = `${esc(i.tracker_label)} ${esc(i.external_key)}`;
+  const status = {ok: ["sync-ok", "In sync"], pending: ["sync-pending", "Sending update…"],
+    failed: ["sync-failed", "Update not delivered"]}[i.sync_status] || ["hint", "Nothing sent yet"];
+  return `<p class="hint">Linked to ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${ref}</a>` : ref}
+    · <span class="${status[0]}">${status[1]}</span>
+    ${i.sync_status === "failed" ? `<br>${esc(i.sync_error)} <button class="secondary" id="retry-sync">Send again</button>` : ""}</p>`;
+}
+
+function fullDetail(i) {
+  const s = i.suggestion, role = state.user.role;
+  const p = i.final.priority || s.priority;
+  const similar = i.similar_issues.length
+    ? `<ul class="plain">${i.similar_issues.map((x) => `<li><b>#${x.id} ${esc(x.title)}</b>
+        <span class="score">${Math.round(x.similarity * 100)}% similar</span>
+        <div class="hint">Fix: ${esc(x.resolution)}</div></li>`).join("")}</ul>`
+    : `<p class="hint">No similar resolved issues found.</p>`;
+
+  let actions = "";
+  if (role === "triage_lead" && i.status === "new") {
+    actions = planPanel(i);
+  } else if (i.status === "needs_info") {
+    actions = `<div class="flags"><b>Waiting on the reporter</b><p style="margin:4px 0 0">${esc(i.info_request)}</p></div>`;
+  } else if (i.status === "assigned") {
+    actions = `<h3>Record the fix</h3>
+      <p class="hint">Resolved issues are used to suggest fixes for similar issues in future.</p>
+      <label for="resolution">Resolution</label><textarea id="resolution" style="min-height:80px"></textarea>
+      ${i.tracker_label ? `<label class="inline"><input type="checkbox" id="close-ext" checked> Close ${esc(i.tracker_label)} ${esc(i.external_key)} and post this resolution there</label>` : ""}
+      <div class="row"><button id="resolve">Mark as resolved</button></div>`;
+  } else if (i.status === "resolved") {
+    actions = `<h3>Resolution</h3><p>${i.resolution ? esc(i.resolution) : '<span class="hint">Closed in the tracker without a resolution note.</span>'}</p>`;
+  }
+
+  return `<h2>#${i.id} ${esc(i.title)}</h2>
+    <p class="hint">Reported by ${esc(i.reporter_name || "unknown")} · ${when(i.created_at)}
+      ${i.assignee_name ? ` · Assigned to ${esc(i.assignee_name)}` : ""}
+      ${i.triage_count > 1 ? ` · re-analysed after the reporter added details` : ""}</p>
+    ${trackerLine(i)}
+    <div class="tag ${p}">
+      <div class="prio ${p}">${nice(p)} priority</div>
+      <div class="facts"><span>Type <b>${nice(i.final.type || s.type)}</b></span>
+        <span>Module <b>${nice(i.final.module || s.module)}</b></span>
+        <span>AI confidence <b>${pct(s.confidence)}</b></span>
+        <span>Classified by <b>${s.source === "llm" ? "AI model" : "backup classifier"}</b></span></div>
+      ${i.final.action === "override" ? `<p class="hint">Changed by the triage lead from the AI suggestion (${nice(s.priority)}, ${nice(s.type)}, ${nice(s.module)})${i.final.note ? `: ${esc(i.final.note)}` : ""}</p>` : ""}
+      <p style="margin:8px 0 0">${esc(s.justification)}</p>
+    </div>
+    ${role === "triage_lead" && i.status === "new" && i.review_reasons.length ? `<div class="flags"><b>Check before approving</b>
+      <ul>${i.review_reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
+      ${s.fallback_reason ? `<div class="hint">Reason for backup mode: ${esc(s.fallback_reason)}</div>` : ""}</div>` : ""}
+    <h3>Suggested fix</h3>
+    ${i.recommendation ? `<div class="rec">${esc(i.recommendation)}<div class="hint">Based on ${i.recommendation_sources.map((x) => "#" + x).join(", ")}${i.duplicate_of ? ` · likely duplicate of #${i.duplicate_of}` : ""}</div></div>`
+      : `<p class="hint">No reliable fix found in past issues.</p>`}
+    <h3>Similar resolved issues</h3>${similar}
+    <details><summary>Issue text as analysed${i.redactions ? ` (${i.redactions} item(s) redacted)` : ""}</summary>
+      <p style="white-space:pre-wrap">${esc(i.description)}</p></details>
+    ${actions}
+    <div id="detail-msg" role="alert"></div>`;
+}
+
+const EXTRA = ["regression", "security", "duplicate", "data-loss", "needs-repro", "customer-impact"];
+const baseLabels = (c) => [`type-${c.type}`.replace(/_/g, "-"), `module-${c.module}`.replace(/_/g, "-"), `priority-${c.priority}`, "triage-desk"];
+
+function describeCall(t) {
+  const inp = t.input || {};
+  if (t.tool === "search_similar_issues") return `Searched past fixes for <code>${esc(inp.query)}</code>`;
+  if (t.tool === "get_past_issue") return `Opened past issue #${esc(inp.issue_id)}`;
+  if (t.tool === "rank_developers") return `Asked the assignment rules to rank developers for <code>${esc(nice(inp.module))}</code>`;
+  if (t.tool === "submit_plan") return `Submitted this plan for your approval`;
+  return esc(t.tool);
+}
+
+function planPanel(i) {
+  const pl = i.plan;
+  if (!pl) return `<div class="plan"><p class="hint">No plan yet.</p><button id="replan">Ask the agent for a plan</button></div>`;
+  const p = pl.plan, byAgent = pl.source === "agent";
+  const where = i.tracker_label ? `${esc(i.tracker_label)} ${esc(i.external_key)}` : null;
+  const extras = p.labels.filter((l) => EXTRA.includes(l));
+  const candRows = (pl.candidates || []).map((c) => `<tr>
+    <td><input type="radio" name="assignee" value="${c.id}" id="c-${c.id}" ${c.id === p.assignee_id ? "checked" : ""}></td>
+    <td><label for="c-${c.id}" style="margin:0;font-weight:700">${esc(c.name)}</label>
+      ${c.id === p.assignee_id ? `<span class="agent-choice"> ${byAgent ? "agent's choice" : "top ranked"}</span>` : ""}
+      <div class="hint">${c.reasons.map(esc).join(" · ")}</div></td>
+    <td class="score">${c.score}</td></tr>`).join("");
+  return `<div class="plan">
+    <h3>${byAgent ? "Plan proposed by the triage agent" : "Plan proposed by the assignment rules"}</h3>
+    <p style="margin:0">${esc(p.summary)}</p>
+    <p class="hint">Nothing happens until you approve. ${byAgent ? `Agent confidence ${pct(p.confidence)}.` : esc(pl.fallback_reason ? "Agent unavailable: " + pl.fallback_reason : "")}</p>
+    ${p.notes && p.notes.length && byAgent ? `<div class="flags"><b>Corrected before showing you</b><ul>${p.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul></div>` : ""}
+    <fieldset><legend>Next step</legend>
+      <label class="inline"><input type="radio" name="next" value="assign" ${p.action === "assign" ? "checked" : ""}> Classify and assign</label>
+      <label class="inline"><input type="radio" name="next" value="request_info" ${p.action === "request_info" ? "checked" : ""}> Ask the reporter for details first</label>
+    </fieldset>
+    <div id="assign-part" ${p.action === "assign" ? "" : "hidden"}>
+      <div class="facts" style="gap:8px 12px">
+        <span><label for="o-type">Type</label>${selectHtml("o-type", state.options.types, p.classification.type)}</span>
+        <span><label for="o-module">Module</label>${selectHtml("o-module", state.options.modules, p.classification.module)}</span>
+        <span><label for="o-priority">Priority</label>${selectHtml("o-priority", state.options.priorities, p.classification.priority)}</span>
+      </div>
+      <h3>Assign to</h3>
+      <p class="hint">Ranked by fixed rules: owns the module (+3), fixed a similar issue (+2 each), past fixes in the module (+0.5 each), open assignments (−1 each).${byAgent && p.assignee_reason ? ` Agent's reason: ${esc(p.assignee_reason)}` : ""}</p>
+      <div class="table-wrap"><table class="pick"><thead><tr><th></th><th>Developer</th><th>Score</th></tr></thead><tbody>${candRows}</tbody></table></div>
+      <label for="other-dev">Or choose someone else</label><select id="other-dev"><option value="">—</option></select>
+      <label for="o-comment">Reply to the reporter ${where ? `(posted on ${where})` : "(shown in their issue list)"}</label>
+      <textarea id="o-comment" style="min-height:80px">${esc(p.comment_for_reporter)}</textarea>
+      <label>Labels</label>
+      <div class="labels" id="label-preview"></div>
+      <div>${EXTRA.map((l) => `<label class="inline"><input type="checkbox" class="extra" value="${l}" ${extras.includes(l) ? "checked" : ""}>${l}</label>`).join("")}</div>
+      ${where ? `<label class="inline"><input type="checkbox" id="post-ext" checked> Send labels, priority, assignee and reply to ${where}</label>` : ""}
+      <label for="o-note">Note for the audit trail (optional)</label><input id="o-note">
+      <div class="row"><button id="approve">Approve and assign</button><button class="secondary" id="replan">Ask the agent again</button></div>
+    </div>
+    <div id="info-part" ${p.action === "request_info" ? "" : "hidden"}>
+      <label for="info-q">Question for the reporter ${where ? `(posted on ${where})` : ""}</label>
+      <textarea id="info-q" style="min-height:80px">${esc(p.question_for_reporter || "Could you tell us which page you were on, the exact steps you took, and any error message you saw?")}</textarea>
+      <div class="row"><button id="send-q">Send question</button><button class="secondary" id="replan2">Ask the agent again</button></div>
+    </div>
+    ${pl.trace && pl.trace.length ? `<details><summary>How the agent reached this plan (${pl.steps} step${pl.steps === 1 ? "" : "s"})</summary>
+      <ol class="trace">${pl.trace.map((t) => `<li>${describeCall(t)}${t.output ? `<div class="hint">${esc(Array.isArray(t.output) ? t.output.join("; ") : t.output)}</div>` : ""}</li>`).join("")}</ol></details>` : ""}
+  </div>`;
+}
+
+function wireDetail(i) {
+  const fail = (err) => { const m = $("#detail-msg"); m.className = "error"; m.textContent = err.message; };
+  const done = () => viewList(state.view === "queue" ? "all" : state.view);
+  const on = (sel, fn) => { const el = $(sel); if (el) el.onclick = fn; };
+
+  on("#send-info", () => post(`/api/issues/${i.id}/add-info`, {details: $("#info").value}).then(done, fail));
+  on("#resolve", () => post(`/api/issues/${i.id}/resolve`, {resolution: $("#resolution").value,
+    close_in_tracker: $("#close-ext") ? $("#close-ext").checked : false}).then(done, fail));
+  on("#retry-sync", () => post(`/api/issues/${i.id}/sync-retry`, {}).then(() => openIssue(i.id), fail));
+  const replan = (btn) => { btn.disabled = true; btn.textContent = "Agent is working…";
+    post(`/api/issues/${i.id}/replan`, {}).then(() => openIssue(i.id), fail); };
+  on("#replan", (e) => replan(e.target));
+  on("#replan2", (e) => replan(e.target));
+  if (!i.plan || !$("#approve")) return;
+
+  const p = i.plan.plan;
+  $$('input[name="next"]').forEach((r) => r.onchange = () => {
+    const v = $('input[name="next"]:checked').value;
+    $("#assign-part").hidden = v !== "assign"; $("#info-part").hidden = v !== "request_info";
+  });
+  const cls = () => ({type: $("#o-type").value, module: $("#o-module").value, priority: $("#o-priority").value});
+  const extras = () => $$(".extra").filter((c) => c.checked).map((c) => c.value);
+  const preview = () => { $("#label-preview").innerHTML = [...baseLabels(cls()), ...extras()].map((l) => `<span>${esc(l)}</span>`).join(""); };
+  $$("#o-type, #o-module, #o-priority, .extra").forEach((el) => el.onchange = preview);
+  preview();
+
+  const shortlist = new Set((i.plan.candidates || []).map((c) => c.id));
+  api("/api/developers").then((devs) => {
+    $("#other-dev").innerHTML += devs.filter((d) => !shortlist.has(d.id))
+      .map((d) => `<option value="${d.id}">${esc(d.name)} (${d.open_count} open)</option>`).join("");
+  }).catch(() => {});
+  $("#other-dev").onchange = () => { if ($("#other-dev").value) $$('input[name="assignee"]').forEach((r) => r.checked = false); };
+  $$('input[name="assignee"]').forEach((r) => r.onchange = () => $("#other-dev").value = "");
+
+  on("#approve", () => {
+    const c = cls();
+    const changed = ["type", "module", "priority"].some((f) => c[f] !== p.classification[f]);
+    const picked = $('input[name="assignee"]:checked');
+    const assignee = +($("#other-dev").value || (picked && picked.value) || 0);
+    if (!assignee) return fail(new Error("Choose a developer to assign."));
+    post(`/api/issues/${i.id}/triage`, {action: changed ? "override" : "accept", ...c,
+      assignee_id: assignee, comment: $("#o-comment").value, extra_labels: extras(),
+      post_to_tracker: $("#post-ext") ? $("#post-ext").checked : false, note: $("#o-note").value}).then(done, fail);
+  });
+  on("#send-q", () => post(`/api/issues/${i.id}/request-info`, {message: $("#info-q").value}).then(done, fail));
+}
+
+async function runSync(btn, msgEl, after) {
+  btn.disabled = true; const label = btn.textContent; btn.textContent = "Importing…";
+  try {
+    const r = await post("/api/integration/sync", {});
+    msgEl.className = r.errors.length ? "error" : "success";
+    msgEl.textContent = `${r.imported} new, ${r.replies} reporter repl${r.replies === 1 ? "y" : "ies"}, ${r.closed} closed in tracker, ${r.retried} update(s) re-sent` +
+      (r.errors.length ? ` · Problems: ${r.errors.join("; ")}` : "");
+    if (after) setTimeout(after, 1200);
+  } catch (err) { msgEl.className = "error"; msgEl.textContent = err.message; }
+  finally { btn.disabled = false; btn.textContent = label; }
+}
+
+/* ---------- insights (lead, admin) ---------- */
+
+async function viewInsights() {
+  $("#view").innerHTML = `<section><h2>Insights</h2><div id="ins"></div></section>`;
+  try {
+    const m = await api("/api/metrics");
+    const stat = (n, label) => `<div class="stat"><div class="n">${n ?? "–"}</div><div class="hint">${label}</div></div>`;
+    $("#ins").innerHTML = `<div class="stats">
+      ${stat(m.total, "issues submitted")} ${stat(m.by_status.new, "awaiting triage")}
+      ${stat(m.by_status.needs_info, "waiting on reporters")} ${stat(m.by_status.assigned, "with developers")}
+      ${stat(m.by_status.resolved, "resolved")}</div>
+      <h3>How often the lead agreed with the AI</h3>
+      <div class="stats">${stat(pct(m.agreement.type), "type")} ${stat(pct(m.agreement.module), "module")}
+      ${stat(pct(m.agreement.priority), "priority")} ${stat(`${m.accepted}/${m.reviewed}`, "accepted without changes")}</div>
+      <h3>Triage agent</h3>
+      <div class="stats">${stat(`${m.agent.by_agent}/${m.agent.plans}`, "plans written by the agent (rest by rules)")}
+      ${stat(`${m.agent.approved_unchanged}/${m.agent.decided}`, "plans approved without edits")}
+      ${stat(pct(m.agent.assignee_kept), "proposed assignee kept")}
+      ${stat(pct(m.agent.comment_kept), "proposed reply kept")}
+      ${stat(m.agent.avg_steps, "average tool steps")}
+      ${stat(m.agent.avg_tokens_in, "average agent input tokens")}</div>
+      <h3>Running cost and reliability</h3>
+      <div class="stats">${stat(pct(m.fallback_rate), "handled by backup classifier")}
+      ${stat(m.avg_latency_ms != null ? m.avg_latency_ms + " ms" : null, "average analysis time")}
+      ${stat(m.avg_tokens_in, "average input tokens")} ${stat(m.avg_tokens_out, "average output tokens")}
+      ${stat(m.sync_failures, "tracker updates waiting")}</div>
+      <p class="hint">Token counts multiplied by your provider's current price give the cost per issue.</p>`;
+  } catch (err) { $("#ins").innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+}
+
+/* ---------- administration ---------- */
+
+async function viewUsers() {
+  const o = state.options;
+  $("#view").innerHTML = `<section><h2>Users and roles</h2>
+      <p class="hint">Developers are ranked for each issue by the modules they own, their open workload and who fixed similar issues. Map tracker accounts so assignments also appear in GitHub or Jira.</p>
+      <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Modules owned</th><th>Tracker accounts</th><th>Status</th><th></th></tr></thead>
+      <tbody id="users"></tbody></table></div><div id="users-msg" role="alert"></div></section>
+    <section class="narrow"><h2>Add a user</h2>
+      <form id="new-user">
+        <label for="nu-name">Display name</label><input id="nu-name">
+        <label for="nu-user">Username</label><input id="nu-user" autocomplete="off">
+        <label for="nu-role">Role</label>${selectHtml("nu-role", o.roles, "reporter", o.role_labels)}
+        <label for="nu-pass">Temporary password (8+ characters)</label><input id="nu-pass" type="password" autocomplete="new-password">
+        <div class="row"><button type="submit">Add user</button></div>
+        <div id="nu-msg" role="alert"></div></form></section>`;
+  const msg = (el, cls, text) => { el.className = cls; el.textContent = text; };
+
+  async function load() {
+    const users = await api("/api/admin/users");
+    $("#users").innerHTML = users.map((u) => `<tr data-id="${u.id}">
+      <td><b>${esc(u.display_name)}</b><div class="hint">${esc(u.username)}</div></td>
+      <td>${selectHtml(`role-${u.id}`, o.roles, u.role, o.role_labels)}</td>
+      <td>${u.role === "developer" ? o.modules.map((m) => `<label class="inline"><input type="checkbox" value="${m}" ${u.modules.includes(m) ? "checked" : ""}>${nice(m)}</label>`).join("") : `<span class="hint">–</span>`}</td>
+      <td>${u.role === "developer" ? `<label class="hint" style="margin:0" for="gh-${u.id}">GitHub login</label><input class="inline-input gh" id="gh-${u.id}" value="${esc(u.github_login || "")}">
+        <label class="hint" style="margin:4px 0 0" for="jr-${u.id}">Jira account ID</label><input class="inline-input jr" id="jr-${u.id}" value="${esc(u.jira_account_id || "")}">` : `<span class="hint">–</span>`}</td>
+      <td><label class="inline"><input type="checkbox" class="active" ${u.active ? "checked" : ""}>Active</label></td>
+      <td><button class="secondary save">Save</button> <button class="secondary reset">Reset password</button></td></tr>`).join("");
+    $$("#users tr").forEach((tr) => {
+      const id = +tr.dataset.id;
+      $(".save", tr).onclick = () => post(`/api/admin/users/${id}`, {
+        role: $(`#role-${id}`).value, active: $(".active", tr).checked,
+        modules: $$('input[type="checkbox"][value]', tr).filter((c) => c.checked).map((c) => c.value),
+        ...($(".gh", tr) ? {github_login: $(".gh", tr).value, jira_account_id: $(".jr", tr).value} : {}),
+      }, "PATCH").then(() => { msg($("#users-msg"), "success", "Saved."); load(); },
+                       (e) => msg($("#users-msg"), "error", e.message));
+      $(".reset", tr).onclick = () => {
+        const pw = prompt("New temporary password (at least 8 characters):");
+        if (pw) post(`/api/admin/users/${id}`, {password: pw}, "PATCH")
+          .then(() => msg($("#users-msg"), "success", "Password reset."), (e) => msg($("#users-msg"), "error", e.message));
+      };
+    });
+  }
+  $("#new-user").onsubmit = (e) => {
+    e.preventDefault();
+    post("/api/admin/users", {display_name: $("#nu-name").value, username: $("#nu-user").value,
+      role: $("#nu-role").value, password: $("#nu-pass").value})
+      .then((u) => { e.target.reset(); msg($("#nu-msg"), "success", `Added ${u.username}.`); load(); },
+            (err) => msg($("#nu-msg"), "error", err.message));
+  };
+  load().catch((e) => msg($("#users-msg"), "error", e.message));
+}
+
+async function viewSettings() {
+  $("#view").innerHTML = `<div class="narrow"><section><h2>AI settings</h2><div id="set"></div></section></div>`;
+  try {
+    const s = await api("/api/admin/settings");
+    $("#set").innerHTML = `
+      <p>Model: <b>${esc(s.model)}</b> · API key ${s.api_key_configured ? "configured" : "<b>not configured</b> (backup classifier only)"}</p>
+      <label class="inline"><input type="checkbox" id="s-ai" ${s.llm_enabled ? "checked" : ""}> Use the AI model for triage</label>
+      <p class="hint">Turn this off to stop sending issue text to the external AI service. The backup classifier keeps working.</p>
+      <label class="inline"><input type="checkbox" id="s-agent" ${s.agent_enabled ? "checked" : ""}> Let the triage agent propose action plans</label>
+      <p class="hint">When off, plans come from the assignment rules only. Plans are always approved by the triage lead.</p>
+      <label for="s-thr">Flag suggestions for review below this confidence (0–1)</label>
+      <input id="s-thr" type="number" min="0" max="1" step="0.05" value="${s.confidence_threshold}" style="max-width:120px">
+      <div class="row"><button id="s-save">Save settings</button></div><div id="s-msg" role="alert"></div>`;
+    $("#s-save").onclick = () => post("/api/admin/settings",
+      {llm_enabled: $("#s-ai").checked, agent_enabled: $("#s-agent").checked, confidence_threshold: $("#s-thr").value}, "PUT")
+      .then(() => { $("#s-msg").className = "success"; $("#s-msg").textContent = "Settings saved."; },
+            (e) => { $("#s-msg").className = "error"; $("#s-msg").textContent = e.message; });
+  } catch (err) { $("#set").innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+}
+
+async function viewAudit() {
+  $("#view").innerHTML = `<section><h2>Activity log</h2>
+    <p class="hint">Who did what and when. Issue text is not stored here.</p>
+    <div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Issue</th><th>Details</th></tr></thead>
+    <tbody id="audit"></tbody></table></div></section>`;
+  try {
+    const rows = await api("/api/admin/audit?limit=200");
+    $("#audit").innerHTML = rows.length ? rows.map((r) => `<tr><td>${when(r.at)}</td>
+      <td>${esc(r.user_name || "unknown")}${r.user_role ? `<div class="hint">${esc(state.options.role_labels[r.user_role])}</div>` : ""}</td>
+      <td>${nice(r.action)}</td><td>${r.issue_id ? "#" + r.issue_id : ""}</td>
+      <td class="hint">${esc(r.detail || "")}</td></tr>`).join("")
+      : `<tr><td colspan="5" class="empty">No activity yet.</td></tr>`;
+  } catch (err) { $("#audit").innerHTML = `<tr><td colspan="5" class="error">${esc(err.message)}</td></tr>`; }
+}
+
+/* ---------- tracker integration (lead, admin) ---------- */
+
+async function viewTracker() {
+  $("#view").innerHTML = `<section><h2>Issue tracker</h2><div id="trk"></div></section>
+    <section id="sim" hidden></section><section id="events" hidden></section>`;
+  let t;
+  try { t = await api("/api/integration"); } catch (err) { $("#trk").innerHTML = `<p class="error">${esc(err.message)}</p>`; return; }
+  $("#trk").innerHTML = t.configured ? `
+      <p>Connected to <b>${esc(t.label)}</b>. ${t.last_sync ? `Last import ${when(t.last_sync)}.` : "Not imported yet."}
+      ${t.pending_writes ? `<b>${t.pending_writes}</b> update(s) waiting to be sent.` : ""}</p>
+      ${t.webhook_url ? `<p class="hint">For instant imports, point a ${esc(t.label)} webhook at <code>${location.origin}${esc(t.webhook_url)}</code> with the signing secret from the server settings. Without it, use the button below or the background interval.</p>` : ""}
+      <div class="row"><button id="sync-now">Import now</button><span id="sync-msg" class="hint"></span></div>`
+    : `<p>No tracker is connected. Set <code>TRACKER</code> and the tracker's credentials on the server (see the README), then restart.</p>`;
+  if (t.configured) $("#sync-now").onclick = () => runSync($("#sync-now"), $("#sync-msg"), viewTracker);
+  if (t.tracker === "simulated") loadSimulated();
+  if (state.user.role === "admin") {
+    $("#events").hidden = false;
+    $("#events").innerHTML = `<h2>Sync log</h2><div class="table-wrap"><table><thead><tr><th>When</th><th>Direction</th><th>Action</th><th>Issue</th><th>Result</th></tr></thead><tbody>
+      ${t.events.length ? t.events.map((e) => `<tr><td>${when(e.at)}</td><td>${e.direction === "in" ? "from tracker" : "to tracker"}</td>
+        <td>${nice(e.action)}</td><td>${e.issue_id ? "#" + e.issue_id : ""}</td>
+        <td class="${e.ok ? "sync-ok" : "sync-failed"}">${e.ok ? "OK" : "Failed"}<div class="hint">${esc(e.detail || "")}</div></td></tr>`).join("")
+        : `<tr><td colspan="5" class="empty">Nothing synced yet.</td></tr>`}</tbody></table></div>`;
+  }
+}
+
+async function loadSimulated() {
+  const box = $("#sim");
+  box.hidden = false;
+  try {
+    const st = await api("/api/integration/simulated");
+    box.innerHTML = `<h2>Simulated tracker</h2>
+      <p class="hint">A stand-in for GitHub or Jira so the full pipeline can be shown offline. Use it to act as a reporter or as someone working directly in the tracker.</p>
+      <ul class="plain">${st.issues.map((x) => `<li><b>${esc(x.key)}</b> ${esc(x.title)} <span class="status-pill ${x.state === "closed" ? "resolved" : ""}">${x.state}</span>
+        <div class="hint">Reporter ${esc(x.reporter)} · assignee ${esc(x.assignee || "none")} · priority ${esc(x.priority || "none")}</div>
+        ${x.labels.length ? `<div class="labels">${x.labels.map((l) => `<span>${esc(l)}</span>`).join("")}</div>` : ""}
+        ${x.comments.length ? `<ul class="comments">${x.comments.map((c) => `<li><b>${esc(c.author)}</b>: ${esc(c.body.replace("[triage-desk]", "").trim())}</li>`).join("")}</ul>` : ""}
+        ${x.state === "open" ? `<div class="row" style="margin-top:6px"><button class="secondary sim-reply" data-key="${esc(x.key)}">Reply as reporter</button>
+          <button class="secondary sim-close" data-key="${esc(x.key)}">Close in tracker</button></div>` : ""}</li>`).join("")}</ul>
+      <h3>Create a tracker issue</h3>
+      <label for="sim-title">Title</label><input id="sim-title">
+      <label for="sim-body">Description</label><textarea id="sim-body" style="min-height:70px"></textarea>
+      <label for="sim-rep">Reporter</label><input id="sim-rep" value="demo-client">
+      <div class="row"><button id="sim-create">Create in tracker</button></div><div id="sim-msg" role="alert"></div>`;
+    const msg = (cls, text) => { $("#sim-msg").className = cls; $("#sim-msg").textContent = text; };
+    $("#sim-create").onclick = () => post("/api/integration/simulated/issues",
+      {title: $("#sim-title").value, body: $("#sim-body").value, reporter: $("#sim-rep").value})
+      .then((x) => { msg("success", `Created ${x.key}. Import it from the queue or with Import now.`); setTimeout(loadSimulated, 800); },
+            (e) => msg("error", e.message));
+    $$(".sim-reply").forEach((b) => b.onclick = () => {
+      const text = prompt(`Reply on ${b.dataset.key} as the reporter:`);
+      if (text) post(`/api/integration/simulated/issues/${b.dataset.key}/reply`, {body: text}).then(loadSimulated, (e) => msg("error", e.message));
+    });
+    $$(".sim-close").forEach((b) => b.onclick = () => {
+      const text = prompt(`Closing comment for ${b.dataset.key} (how it was fixed):`);
+      if (text) post(`/api/integration/simulated/issues/${b.dataset.key}/close`, {body: text}).then(loadSimulated, (e) => msg("error", e.message));
+    });
+  } catch (err) { box.innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+}
+
+/* ---------- start ---------- */
+api("/api/me").then(startApp).catch(showLogin);
+</script>
+</body>
+</html>

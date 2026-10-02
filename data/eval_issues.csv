@@ -1,0 +1,21 @@
+title,description,type,module,priority
+Cannot log in after changing my password,It says wrong password even though I just changed it a minute ago.,bug,authentication,high
+Promo code causes server error at checkout,When I enter a promo code on the payment page I get an internal server error and cannot pay.,bug,payments,critical
+Download invoices as PDF,It would be helpful to download invoices as PDF files for our records.,feature_request,reporting,low
+Searching for products is extremely slow,Search results take around ten seconds to appear for our store.,bug,performance,high
+Where can I find my API token,I need to find my API token to connect our warehouse system.,question,api,low
+Same order charged twice,Two customers were billed twice for a single order today.,bug,payments,critical
+Checkout button label cut off on phones,On small Android phones the checkout button label is cut in half.,bug,user_interface,low
+Weekly report includes cancelled orders,The weekly report totals are too high because cancelled orders are counted.,bug,reporting,medium
+Add Google sign in,Customers would like to sign in with their Google account.,feature_request,authentication,medium
+Whole application unavailable,Every user is getting a 502 error and nobody can access the system.,bug,performance,critical
+Partner integration getting rate limit errors,Our partner says their integration gets 429 errors even with very few requests.,bug,api,high
+How many images can I upload per product,A store owner wants to know the maximum number of images per product.,question,other,low
+Password reset email link says expired,The reset link in the email says it has expired as soon as I click it.,bug,authentication,high
+Dashboard charts not rendering in Firefox,Charts on the dashboard are blank in Firefox but work in Chrome.,bug,user_interface,medium
+Refunds not visible to customers,Refunds we processed yesterday are not showing in customer accounts.,bug,payments,high
+Filter reports by customer region,Please add a filter to see report figures by customer region.,feature_request,reporting,low
+API returns 500 when page_size is over 100,Requesting page_size greater than 100 returns a 500 error instead of a validation message.,bug,api,medium
+Background worker crashes with out of memory,The background worker process crashes with an out of memory error every night.,bug,performance,high
+Save multiple delivery addresses,Customers want to save more than one delivery address in their account.,feature_request,other,low
+Customers can see other customers' orders,By changing the order ID in the URL a logged-in customer can view another customer's order history.,bug,authentication,critical
