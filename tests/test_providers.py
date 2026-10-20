@@ -56,7 +56,7 @@ class OllamaProviderTests(Base):
         self.assertEqual(data["suggestion"]["priority"], "critical")
         first = post.call_args_list[0]
         self.assertTrue(first.args[0].endswith("/api/chat"))
-        self.assertEqual(first.kwargs["json"]["format"], "json")
+        self.assertEqual(first.kwargs["json"]["format"]["properties"]["type"]["enum"], config.ISSUE_TYPES)
         self.assertEqual(first.kwargs["json"]["messages"][0]["role"], "system")
 
     # PR3: the agent's tool loop works through Ollama, including tool results sent back
@@ -104,3 +104,16 @@ class OllamaProviderTests(Base):
             with self.assertRaises(providers.ProviderError) as ctx:
                 providers.send("s", [{"role": "user", "content": "hi"}])
         self.assertIn("ollama pull qwen2.5:3b", str(ctx.exception))
+
+
+class SmallModelOutputTests(Base):
+    # PR6: a wrapped object and ids written as strings (common from small local models) still validate
+    def test_pr6_tolerates_wrapped_output_and_string_ids(self):
+        from triage.validation import validate_llm_output
+        raw = {"All": {"type": "bug", "module": "authentication", "priority": "high", "confidence": 0.8,
+                       "justification": "x", "duplicate_of": "1", "recommendation": "Re-hash on reset.",
+                       "recommendation_sources": ["1", "23", "99"]}}
+        out = validate_llm_output(raw, allowed_ids=[1, 23])
+        self.assertEqual(out["type"], "bug")
+        self.assertEqual(out["duplicate_of"], 1)
+        self.assertEqual(out["recommendation_sources"], [1, 23])  # 99 was never shown: dropped
