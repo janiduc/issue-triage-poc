@@ -418,3 +418,25 @@ class JiraTests(Base):
         with mock.patch.object(tracker_http.requests, "request", side_effect=responses):
             with self.assertRaises(SyncError):
                 self.jira().close_issue("SHOP-7", "Fixed.")
+
+
+class AgentQuirkTests(Base):
+    # AG6: ids as strings or lists (seen from small local models) are read, not crashed on
+    def test_ag6_agent_tolerates_odd_id_types(self):
+        dev = uid("dev.payments")
+        self.agent_patch.stop()
+        script = mock.patch.object(agent, "call_agent_model", side_effect=[
+            tool_use("search_similar_issues", {"query": "discount code checkout 500 error"}),
+            tool_use("submit_plan", {
+                "type": "bug", "module": "payments", "priority": "critical", "action": "assign",
+                "assignee_id": str(dev), "comment_for_reporter": "Thanks.", "duplicate_of": ["2"],
+                "extra_labels": "regression", "confidence": 0.8, "summary": "x"})])
+        lead = self.as_user("lead")
+        with script:
+            issue = self.submit(lead, "Discount code gives server error at checkout",
+                                "Applying a discount code at checkout shows a 500 error.").get_json()
+        plan = lead.get(f"/api/issues/{issue['id']}").get_json()["plan"]
+        self.assertEqual(plan["source"], "agent")
+        self.assertEqual(plan["plan"]["assignee_id"], dev)
+        self.assertEqual(plan["plan"]["duplicate_of"], 2)
+        self.assertIn("regression", plan["plan"]["labels"])

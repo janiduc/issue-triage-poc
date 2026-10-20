@@ -17,6 +17,7 @@ import time
 from . import assignment, config, db
 from .llm import _clean
 from .providers import ProviderError, send
+from .validation import _as_id
 
 MAX_STEPS = 6
 EXTRA_LABELS = {"regression", "security", "duplicate", "data-loss", "needs-repro", "customer-impact"}
@@ -111,7 +112,7 @@ class TriageAgent:
             seen_ids.update(r["id"] for r in results)
             return results
         if name == "get_past_issue":
-            issue_id = args.get("issue_id")
+            issue_id = _as_id(args.get("issue_id"))
             if issue_id not in seen_ids:
                 return {"error": "Only issues returned by search_similar_issues can be opened."}
             row = db.get_issue(issue_id)
@@ -123,7 +124,8 @@ class TriageAgent:
             module = args.get("module")
             if module not in config.MODULES:
                 return {"error": f"Unknown module. Use one of {config.MODULES}."}
-            ids = [i for i in args.get("similar_issue_ids") or [] if i in seen_ids]
+            raw = args.get("similar_issue_ids") or []
+            ids = [i for i in map(_as_id, raw if isinstance(raw, list) else [raw]) if i in seen_ids]
             shortlist = assignment.rank_developers(module, ids)
             shortlists[module] = shortlist
             return shortlist
@@ -184,7 +186,7 @@ class TriageAgent:
         candidates = shortlists.get(cls["module"]) or assignment.rank_developers(
             cls["module"], [i for i in seen_ids])
         allowed_ids = {c["id"] for c in candidates}
-        assignee_id, reason = args.get("assignee_id"), str(args.get("assignee_reason") or "")[:300]
+        assignee_id, reason = _as_id(args.get("assignee_id")), str(args.get("assignee_reason") or "")[:300]
         if assignee_id not in allowed_ids:
             if assignee_id is not None:
                 notes.append("Agent chose someone outside the rule-based shortlist; replaced with the top candidate.")
@@ -195,11 +197,16 @@ class TriageAgent:
         if action == "request_info" and not question:
             action = "assign"
             notes.append("Agent asked for information without a question; switched to assign.")
-        dup = args.get("duplicate_of")
+        raw_dup = args.get("duplicate_of")
+        dup = _as_id(raw_dup[0] if isinstance(raw_dup, list) and raw_dup else raw_dup)
+        if raw_dup not in (None, [], "") and dup is None:
+            notes.append("Agent gave an unreadable duplicate reference; removed.")
         if dup is not None and dup not in seen_ids:
             notes.append(f"Agent cited issue #{dup}, which its tools never returned; removed.")
             dup = None
-        extras = [str(l).lower() for l in (args.get("extra_labels") or []) if str(l).lower() in EXTRA_LABELS][:3]
+        raw_extras = args.get("extra_labels") or []
+        extras = [str(l).lower() for l in (raw_extras if isinstance(raw_extras, list) else [raw_extras])
+                  if str(l).lower() in EXTRA_LABELS][:3]
         try:
             confidence = max(0.0, min(1.0, float(args.get("confidence"))))
         except (TypeError, ValueError):
