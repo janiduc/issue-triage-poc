@@ -197,14 +197,15 @@ schedule. `.github/workflows/ci.yml` lints the code and runs the tests on every 
 ## Tests and evaluation
 
 ```bash
-python -m unittest -v      # 51 tests; AI model, Ollama, GitHub and Jira are all mocked
+python -m unittest -v      # 53 tests; AI model, Ollama, GitHub and Jira are all mocked
 python evaluate.py         # LLM vs baseline classifier: accuracy, macro-F1, confusion matrices,
                            # duplicates, prompt injection, tokens, cost
 python evaluate_agent.py   # the agent's plans: next step, labels, assignee, corrections, steps
 ```
 
 Both evaluation scripts use the model configured in `.env` and accept `--limit N` for a quick
-run. The test set (`data/eval_issues.csv`) has 50 fictional issues with at least five of every
+run. Results from the free local model (`qwen2.5:3b`) are in
+[docs/evaluation_results.md](docs/evaluation_results.md). The test set (`data/eval_issues.csv`) has 50 fictional issues with at least five of every
 type, module and priority. Each is marked as normal, duplicate (of a named seeded past issue),
 vague, or prompt injection, and results are reported per case.
 
