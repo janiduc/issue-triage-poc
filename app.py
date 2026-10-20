@@ -585,6 +585,7 @@ def start_background_sync(app, interval):
 
 
 if __name__ == "__main__":
+    config.load_env_file()
     application = create_app()
     interval = int(os.getenv("SYNC_INTERVAL_SECONDS", "0"))
     if interval > 0:
