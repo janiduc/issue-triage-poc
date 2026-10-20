@@ -114,7 +114,21 @@ Open http://127.0.0.1:5000. Demo accounts all use the password `demo1234`:
 `client.acme` and `tester` (reporters), `lead` (triage lead), `dev.payments`, `dev.platform`,
 `dev.frontend` (developers), `admin`. Change or remove them outside a demo.
 
-Without an API key everything still works using the backup classifier and the rules planner.
+Without a model everything still works using the backup classifier and the rules planner.
+
+### Free local model (Ollama)
+
+The classifier and the agent can run on a free open-weights model on your own machine instead
+of the paid Anthropic API. No API key is needed and no issue text leaves the machine.
+
+1. Install Ollama from ollama.com and start it.
+2. Download a small model that supports tool use: `ollama pull qwen2.5:3b` (about 2 GB).
+   On a machine with more memory, `qwen2.5:7b` is more accurate but slower.
+3. In `.env`: `LLM_PROVIDER=ollama` and `LLM_MODEL=qwen2.5:3b`, then restart the app.
+
+Small local models on a laptop CPU are slower than the hosted API and weaker at the agent's tool
+use. Every plan is still validated and approved by the lead, and the rules planner takes over
+whenever the agent fails, so this changes quality, not safety.
 
 ### Connecting an issue tracker
 
@@ -149,8 +163,11 @@ Webhooks need a public URL. For a local demo, use "Import now" or set `SYNC_INTE
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | none | Enables the LLM and the agent |
-| `LLM_MODEL` | `claude-haiku-4-5-20251001` | Model for classification and the agent |
+| `LLM_PROVIDER` | `anthropic` | `anthropic` (paid API) or `ollama` (free local model) |
+| `ANTHROPIC_API_KEY` | none | Enables the LLM and the agent with the Anthropic provider |
+| `LLM_MODEL` | `claude-haiku-4-5-20251001` (Anthropic), `qwen2.5:3b` (Ollama) | Model for classification and the agent |
+| `OLLAMA_URL` | `http://localhost:11434` | Where Ollama runs |
+| `LLM_TIMEOUT` | `20` (Anthropic), `180` (Ollama) | Seconds to wait for one model reply |
 | `SECRET_KEY` | development value | Signs session cookies; set a long random value |
 | `TRACKER` | `simulated` | `simulated`, `github`, `jira` or `none` |
 | `SYNC_INTERVAL_SECONDS` | `0` | Background polling interval when run with `python app.py` |
@@ -172,9 +189,16 @@ schedule. `.github/workflows/ci.yml` runs the tests on every push.
 ## Tests and evaluation
 
 ```bash
-python -m unittest -v   # 41 tests; AI model, GitHub and Jira are all mocked
-python evaluate.py      # LLM vs baseline classifier: accuracy, macro-F1, tokens, cost
+python -m unittest -v      # 46 tests; AI model, Ollama, GitHub and Jira are all mocked
+python evaluate.py         # LLM vs baseline classifier: accuracy, macro-F1, confusion matrices,
+                           # duplicates, prompt injection, tokens, cost
+python evaluate_agent.py   # the agent's plans: next step, labels, assignee, corrections, steps
 ```
+
+Both evaluation scripts use the model configured in `.env` and accept `--limit N` for a quick
+run. The test set (`data/eval_issues.csv`) has 50 fictional issues with at least five of every
+type, module and priority. Each is marked as normal, duplicate (of a named seeded past issue),
+vague, or prompt injection, and results are reported per case.
 
 | Group | What is tested |
 |---|---|
@@ -182,6 +206,7 @@ python evaluate.py      # LLM vs baseline classifier: accuracy, macro-F1, tokens
 | Access control (AC1–7) | Each role limited to its features; lockout; admin safeguards |
 | Fixes (FX1–4) | Classifier and plan agreement reported separately; lockout expires; bad input returns 400; assigning sends an assign reply, not a request for details |
 | Agent (AG1–5) | Tool-use plan, constraints on assignee and citations, step limit fallback, rules plan for vague issues, approval metrics |
+| Providers (PR1–5) | Ollama needs no key; classification and the agent's tool loop translated to and from Ollama; Ollama down falls back; missing model explained |
 | Ranking (RK1) | Ownership and history rank first; workload lowers score |
 | Pipeline (PL1–7) | Idempotent import, write-back, reporter reply round trip, closing, knowledge-base import, outbox retry after tracker outage, stale labels replaced |
 | GitHub (GH1–4) | Pull requests skipped, correct write endpoints, signed webhook accepted, unsigned rejected, pagination, stale labels replaced |
@@ -197,15 +222,16 @@ python evaluate.py      # LLM vs baseline classifier: accuracy, macro-F1, tokens
 | `triage/assignment.py` | Rule-based developer ranking |
 | `triage/pipeline.py` | Import, reply and closure handling, outbox write-back |
 | `triage/integrations/` | `github.py`, `jira.py`, `simulated.py`, shared `base.py` and `http.py` |
-| `triage/llm.py`, `validation.py` | Classification prompt, API call, output validation |
+| `triage/llm.py`, `validation.py` | Classification prompt, model call, output validation |
+| `triage/providers.py` | Anthropic API and local Ollama behind one call shape |
 | `triage/similarity.py`, `baseline.py` | Embedding search; backup ML classifier |
 | `triage/auth.py`, `redact.py`, `db.py` | Login and roles; secret removal; SQLite storage |
 | `static/index.html` | Single-page front end with screens per role |
 
 ## Disclosure: external components and simulation
 
-- **External services:** Anthropic Messages API (classification and agent); GitHub REST API;
-  Jira Cloud REST API v3.
+- **External services:** Anthropic Messages API or a local Ollama model (classification and
+  agent); GitHub REST API; Jira Cloud REST API v3.
 - **Pretrained model:** `all-MiniLM-L6-v2` sentence embeddings, run locally.
 - **Simulated:** the default tracker (`data/simulated_tracker_seed.json`) and both datasets in
   `data/` describe a fictional e-commerce platform. The GitHub and Jira connectors are tested
