@@ -197,7 +197,7 @@ schedule. `.github/workflows/ci.yml` lints the code and runs the tests on every 
 ## Tests and evaluation
 
 ```bash
-python -m unittest -v      # 53 tests; AI model, Ollama, GitHub and Jira are all mocked
+python -m unittest -v      # 54 tests; AI model, Ollama, GitHub and Jira are all mocked
 python evaluate.py         # LLM vs baseline classifier: accuracy, macro-F1, confusion matrices,
                            # duplicates, prompt injection, tokens, cost
 python evaluate_agent.py   # the agent's plans: next step, labels, assignee, corrections, steps
@@ -244,9 +244,10 @@ vague, or prompt injection, and results are reported per case.
   agent); GitHub REST API; Jira Cloud REST API v3.
 - **Pretrained model:** `all-MiniLM-L6-v2` sentence embeddings, run locally.
 - **Simulated:** the default tracker (`data/simulated_tracker_seed.json`) and both datasets in
-  `data/` describe a fictional e-commerce platform. The GitHub and Jira connectors are tested
-  against mocked API responses; test them against a real repository or project before relying
-  on them.
+  `data/` describe a fictional e-commerce platform. The GitHub connector was also validated
+  end to end against a real repository (import, write-back, reporter reply, closing, outage and
+  retry; see [docs/github_validation.md](docs/github_validation.md)). The Jira connector and
+  the webhooks are tested against mocked API responses only.
 
 ## Known limitations
 

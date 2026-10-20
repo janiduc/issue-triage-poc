@@ -440,3 +440,21 @@ class AgentQuirkTests(Base):
         self.assertEqual(plan["plan"]["assignee_id"], dev)
         self.assertEqual(plan["plan"]["duplicate_of"], 2)
         self.assertIn("regression", plan["plan"]["labels"])
+
+    # AG7: a request for details without a question becomes an assign plan with the standard reply,
+    # not the agent's request text
+    def test_ag7_switched_plan_uses_assign_reply(self):
+        self.agent_patch.stop()
+        script = mock.patch.object(agent, "call_agent_model", side_effect=[
+            tool_use("submit_plan", {
+                "type": "bug", "module": "api", "priority": "medium", "action": "request_info",
+                "comment_for_reporter": "Please provide the request you sent.",
+                "confidence": 0.6, "summary": "x"})])
+        lead = self.as_user("lead")
+        with script:
+            issue = self.submit(lead, "Orders API skips orders",
+                                "Page 1 of the orders endpoint skips the first two orders.").get_json()
+        plan = lead.get(f"/api/issues/{issue['id']}").get_json()["plan"]["plan"]
+        self.assertEqual(plan["action"], "assign")
+        self.assertNotIn("Please provide", plan["comment_for_reporter"])
+        self.assertEqual(plan["comment_for_reporter"], agent.default_comment("assign"))
