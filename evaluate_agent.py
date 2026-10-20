@@ -66,6 +66,8 @@ def main():
             finished, error = True, ""
         except (AgentError, LLMError) as exc:
             plan, usage, finished, error = None, {}, False, str(exc)
+        except Exception as exc:  # malformed model output: the app would use the rules plan
+            plan, usage, finished, error = None, {}, False, f"{type(exc).__name__}: {exc}"
         row = {"title": t["title"], "case": t.get("case", "normal"), "finished": finished,
                "error": error, "expected_action": expected_action,
                "classifier_source": ai["ai_source"],

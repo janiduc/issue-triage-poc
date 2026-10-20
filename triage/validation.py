@@ -23,6 +23,17 @@ def validate_issue_input(payload) -> dict:
     return {"title": title, "description": description, "reporter": reporter}
 
 
+def _as_id(value):
+    """An issue id as an int; accepts "12" and 12, rejects anything else (including True)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
 def validate_llm_output(data, allowed_ids) -> dict:
     """Check the model's JSON against the schema. Raises ValidationError if invalid.
 
@@ -31,6 +42,8 @@ def validate_llm_output(data, allowed_ids) -> dict:
     """
     if not isinstance(data, dict):
         raise ValidationError("LLM output is not a JSON object.")
+    if "type" not in data and len(data) == 1 and isinstance(next(iter(data.values())), dict):
+        data = next(iter(data.values()))  # e.g. {"result": {...}} from a small model
     out = {}
     for field, allowed in (("type", config.ISSUE_TYPES),
                            ("module", config.MODULES),
@@ -49,10 +62,12 @@ def validate_llm_output(data, allowed_ids) -> dict:
     out["justification"] = str(data.get("justification") or "")[:500]
 
     allowed_ids = set(allowed_ids)
-    dup = data.get("duplicate_of")
-    out["duplicate_of"] = dup if isinstance(dup, int) and dup in allowed_ids else None
+    dup = _as_id(data.get("duplicate_of"))
+    out["duplicate_of"] = dup if dup in allowed_ids else None
     sources = data.get("recommendation_sources") or []
-    out["recommendation_sources"] = [s for s in sources if isinstance(s, int) and s in allowed_ids]
+    if not isinstance(sources, list):
+        sources = [sources]
+    out["recommendation_sources"] = [i for i in map(_as_id, sources) if i in allowed_ids]
     rec = data.get("recommendation")
     # A recommendation with no valid source is ungrounded, so it is dropped.
     out["recommendation"] = str(rec)[:1000] if rec and out["recommendation_sources"] else None

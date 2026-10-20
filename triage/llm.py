@@ -38,6 +38,24 @@ Rules:
 - If the issue is too vague to classify reliably, give a low confidence (below 0.5).
 """
 
+# The answer's shape, used by providers that can constrain output (Ollama structured outputs).
+# Small local models otherwise invent keys, wrap the object, or put a module name in "type".
+OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string", "enum": config.ISSUE_TYPES},
+        "module": {"type": "string", "enum": config.MODULES},
+        "priority": {"type": "string", "enum": config.PRIORITIES},
+        "confidence": {"type": "number"},
+        "justification": {"type": "string"},
+        "duplicate_of": {"type": ["integer", "null"]},
+        "recommendation": {"type": ["string", "null"]},
+        "recommendation_sources": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["type", "module", "priority", "confidence", "justification", "duplicate_of",
+                 "recommendation", "recommendation_sources"],
+}
+
 _TAG_RE = re.compile(r"</?\s*(issue|title|description|past_issues|past_issue)\b[^>]*>", re.I)
 
 
@@ -73,7 +91,7 @@ def call_model(user_message):
     """Single model call. Returns (text, usage). Separated out so tests can mock it."""
     try:
         body = send(SYSTEM_PROMPT, [{"role": "user", "content": user_message}],
-                    max_tokens=600, json_mode=True)
+                    max_tokens=600, json_mode=OUTPUT_SCHEMA)
     except ProviderError as exc:
         raise LLMError(str(exc))
     text = "".join(b.get("text", "") for b in body.get("content", []) if b.get("type") == "text")

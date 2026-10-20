@@ -120,7 +120,8 @@ def _ollama(system, messages, tools, max_tokens, json_mode):
     if tools:
         payload["tools"] = to_ollama_tools(tools)
     if json_mode:
-        payload["format"] = "json"
+        # A schema (dict) constrains the model's output to it; True just asks for any JSON.
+        payload["format"] = json_mode if isinstance(json_mode, dict) else "json"
     try:
         resp = requests.post(f"{config.ollama_url()}/api/chat", json=payload,
                              timeout=config.llm_timeout())
