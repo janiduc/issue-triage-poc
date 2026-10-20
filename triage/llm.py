@@ -1,18 +1,15 @@
 """LLM-based triage: classification, priority, duplicate check and grounded recommendation.
 
-Uses the Anthropic Messages API over plain HTTP. Any failure raises LLMError so the
-caller can switch to the fallback classifier.
+Calls the configured model provider (Anthropic API or a local Ollama model, see
+providers.py). Any failure raises LLMError so the caller can switch to the fallback classifier.
 """
 import json
 import re
 import time
 
-import requests
-
 from . import config
+from .providers import ProviderError, send
 from .validation import ValidationError, validate_llm_output
-
-API_URL = "https://api.anthropic.com/v1/messages"
 
 SYSTEM_PROMPT = f"""You are a software issue triage assistant helping a QA lead.
 Classify the issue and, where possible, recommend a resolution based on past resolved issues.
@@ -73,28 +70,12 @@ def _extract_json(text):
 
 
 def call_model(user_message):
-    """Single API call. Returns (text, usage). Separated out so tests can mock it."""
+    """Single model call. Returns (text, usage). Separated out so tests can mock it."""
     try:
-        resp = requests.post(
-            API_URL,
-            headers={"x-api-key": config.llm_api_key(),
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": config.llm_model(), "max_tokens": 600, "temperature": 0,
-                  "system": SYSTEM_PROMPT,
-                  "messages": [{"role": "user", "content": user_message}]},
-            timeout=config.llm_timeout())
-    except requests.Timeout:
-        raise LLMError("LLM request timed out")
-    except requests.RequestException as exc:
-        raise LLMError(f"LLM service unreachable ({type(exc).__name__})")
-    if resp.status_code == 429:
-        raise LLMError("LLM rate limit reached")
-    if resp.status_code in (401, 403):
-        raise LLMError("LLM authentication failed (check API key)")
-    if resp.status_code >= 400:
-        raise LLMError(f"LLM service error (HTTP {resp.status_code})")
-    body = resp.json()
+        body = send(SYSTEM_PROMPT, [{"role": "user", "content": user_message}],
+                    max_tokens=600, json_mode=True)
+    except ProviderError as exc:
+        raise LLMError(str(exc))
     text = "".join(b.get("text", "") for b in body.get("content", []) if b.get("type") == "text")
     return text, body.get("usage", {})
 

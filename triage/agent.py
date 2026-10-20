@@ -12,13 +12,11 @@ Safeguards:
 - If the model is unavailable or misbehaves, a rules-only plan is produced instead.
 """
 import json
-import re
 import time
 
-import requests
-
 from . import assignment, config, db
-from .llm import API_URL, LLMError, _clean
+from .llm import _clean
+from .providers import ProviderError, send
 
 MAX_STEPS = 6
 EXTRA_LABELS = {"regression", "security", "duplicate", "data-loss", "needs-repro", "customer-impact"}
@@ -88,20 +86,11 @@ class AgentError(Exception):
 
 
 def call_agent_model(messages):
-    """One Messages API call with tools. Returns the response body. Mocked in tests."""
+    """One model call with tools. Returns an Anthropic-format body. Mocked in tests."""
     try:
-        resp = requests.post(
-            API_URL,
-            headers={"x-api-key": config.llm_api_key(), "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": config.llm_model(), "max_tokens": 1024, "temperature": 0,
-                  "system": SYSTEM_PROMPT, "tools": TOOLS, "messages": messages},
-            timeout=config.llm_timeout())
-    except requests.RequestException as exc:
-        raise AgentError(f"Agent could not reach the AI service ({type(exc).__name__})")
-    if resp.status_code >= 400:
-        raise AgentError(f"AI service error (HTTP {resp.status_code})")
-    return resp.json()
+        return send(SYSTEM_PROMPT, messages, tools=TOOLS, max_tokens=1024)
+    except ProviderError as exc:
+        raise AgentError(f"Agent could not use the AI model: {exc}")
 
 
 def base_labels(classification):
