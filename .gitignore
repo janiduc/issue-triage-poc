@@ -4,3 +4,6 @@ simulated_tracker.json
 evaluation_results.csv
 __pycache__/
 .venv/
+evaluation_report.txt
+agent_evaluation*.csv
+agent_evaluation*.txt

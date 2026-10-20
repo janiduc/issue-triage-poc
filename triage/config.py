@@ -30,17 +30,30 @@ def llm_api_key():
     return os.getenv("ANTHROPIC_API_KEY")
 
 
+def llm_provider() -> str:
+    """'anthropic' (paid API, needs a key) or 'ollama' (free local model)."""
+    return os.getenv("LLM_PROVIDER", "anthropic").lower()
+
+
 def llm_enabled() -> bool:
-    return os.getenv("LLM_ENABLED", "true").lower() == "true" and bool(llm_api_key())
+    if os.getenv("LLM_ENABLED", "true").lower() != "true":
+        return False
+    return llm_provider() == "ollama" or bool(llm_api_key())
 
 
 def llm_model() -> str:
-    # A small, low-cost model is usually enough for triage; change to compare models.
-    return os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001")
+    # A small model is usually enough for triage; change to compare models.
+    default = "qwen2.5:3b" if llm_provider() == "ollama" else "claude-haiku-4-5-20251001"
+    return os.getenv("LLM_MODEL", default)
 
 
 def llm_timeout() -> float:
-    return float(os.getenv("LLM_TIMEOUT", "20"))
+    # Local models on a laptop CPU are much slower than a hosted API.
+    return float(os.getenv("LLM_TIMEOUT", "180" if llm_provider() == "ollama" else "20"))
+
+
+def ollama_url() -> str:
+    return os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
 
 
 def use_embeddings() -> bool:

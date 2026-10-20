@@ -172,7 +172,7 @@ def create_app():
     def health():
         return jsonify(llm_enabled=ai_enabled(), agent_enabled=agent_enabled(),
                        api_key_configured=config.llm_enabled(),
-                       model=config.llm_model(), similarity_method=service.index.method,
+                       provider=config.llm_provider(), model=config.llm_model(), similarity_method=service.index.method,
                        knowledge_base_size=len(service.index.rows))
 
     # ---------- issues ----------
@@ -471,8 +471,8 @@ def create_app():
     def admin_settings():
         return jsonify(llm_enabled=db.get_setting("llm_enabled", "true") == "true",
                        agent_enabled=db.get_setting("agent_enabled", "true") == "true",
-                       api_key_configured=config.llm_enabled(), model=config.llm_model(),
-                       confidence_threshold=confidence_threshold())
+                       api_key_configured=config.llm_enabled(), provider=config.llm_provider(),
+                       model=config.llm_model(), confidence_threshold=confidence_threshold())
 
     @app.put("/api/admin/settings")
     @require_roles("admin")

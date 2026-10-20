@@ -627,9 +627,10 @@ async function viewSettings() {
   try {
     const s = await api("/api/admin/settings");
     $("#set").innerHTML = `
-      <p>Model: <b>${esc(s.model)}</b> · API key ${s.api_key_configured ? "configured" : "<b>not configured</b> (backup classifier only)"}</p>
+      <p>Model: <b>${esc(s.model)}</b> ${s.provider === "ollama" ? "running locally through Ollama (free, no issue text leaves this machine)"
+        : `via the Anthropic API · API key ${s.api_key_configured ? "configured" : "<b>not configured</b> (backup classifier only)"}`}</p>
       <label class="inline"><input type="checkbox" id="s-ai" ${s.llm_enabled ? "checked" : ""}> Use the AI model for triage</label>
-      <p class="hint">Turn this off to stop sending issue text to the external AI service. The backup classifier keeps working.</p>
+      <p class="hint">Turn this off to stop using the AI model${s.provider === "ollama" ? "" : " and sending issue text to the external AI service"}. The backup classifier keeps working.</p>
       <label class="inline"><input type="checkbox" id="s-agent" ${s.agent_enabled ? "checked" : ""}> Let the triage agent propose action plans</label>
       <p class="hint">When off, plans come from the assignment rules only. Plans are always approved by the triage lead.</p>
       <label for="s-thr">Flag suggestions for review below this confidence (0–1)</label>
