@@ -73,9 +73,14 @@ def view_role_for(issue, user):
 
 
 def create_app():
+    config.check_production_settings()
     app = Flask(__name__, static_folder="static")
     app.config.update(SECRET_KEY=config.secret_key(), SESSION_COOKIE_HTTPONLY=True,
-                      SESSION_COOKIE_SAMESITE="Lax")
+                      SESSION_COOKIE_SAMESITE="Lax",
+                      # Production is served over HTTPS, so the cookie must never travel in clear.
+                      SESSION_COOKIE_SECURE=config.is_production())
+    if not config.is_production() and config.secret_key() in config.DEFAULT_SECRET_KEYS:
+        log.warning("Using the default SECRET_KEY: fine for a local demo, never for a deployment.")
     db.init_db()
     service = TriageService()
     pipeline = Pipeline(service, get_connector())
@@ -134,6 +139,12 @@ def create_app():
     @app.get("/")
     def index():
         return send_from_directory(app.static_folder, "index.html")
+
+    @app.get("/api/public-config")
+    def public_config():
+        """What the sign-in page may show before anyone signs in."""
+        demo = db.get_user_by_username("lead") is not None and config.seed_demo_users()
+        return jsonify(demo_accounts=demo)
 
     @app.post("/api/login")
     def login():

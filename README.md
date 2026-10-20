@@ -106,13 +106,14 @@ Requires Python 3.10+.
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+pip install -r requirements-embeddings.txt   # optional: better similarity search (large download)
 cp .env.example .env               # then fill in the values you need
 python app.py                      # reads .env; variables already set in the shell win
 ```
 
 Open http://127.0.0.1:5000. Demo accounts all use the password `demo1234`:
 `client.acme` and `tester` (reporters), `lead` (triage lead), `dev.payments`, `dev.platform`,
-`dev.frontend` (developers), `admin`. Change or remove them outside a demo.
+`dev.frontend` (developers), `admin`. They exist only in development (see Deployment).
 
 Without a model everything still works using the backup classifier and the rules planner.
 
@@ -173,10 +174,17 @@ Webhooks need a public URL. For a local demo, use "Import now" or set `SYNC_INTE
 | `SYNC_INTERVAL_SECONDS` | `0` | Background polling interval when run with `python app.py` |
 | `USE_EMBEDDINGS` | `true` | `false` uses TF-IDF similarity instead |
 | `DB_PATH` | `triage.db` | SQLite file; delete to reset data and demo users |
+| `APP_ENV` | `development` | `production` refuses a weak `SECRET_KEY`, sets a secure cookie, skips demo accounts |
+| `SEED_DEMO_USERS` | `true` (development), `false` (production) | Create the seven demo accounts on first start |
+| `ADMIN_USERNAME`, `ADMIN_PASSWORD` | `admin`, none | First administrator when demo accounts are off (password 12+ characters) |
 
 ### Deployment
 
-`Dockerfile` builds a container served by gunicorn, with data in a `/data` volume:
+`Dockerfile` builds a container served by gunicorn, with data in a `/data` volume. It runs with
+`APP_ENV=production`, so it will not start until `.env` has a random `SECRET_KEY` of at least
+32 characters and an `ADMIN_PASSWORD` for the first administrator (or `SEED_DEMO_USERS=true`
+for a demo). `.dockerignore` keeps `.env`, the database and the virtual environment out of the
+image.
 
 ```bash
 docker build -t triage-desk .
@@ -184,12 +192,12 @@ docker run -p 8000:8000 --env-file .env -v triage-data:/data triage-desk
 ```
 
 Under gunicorn the background poller does not run; use webhooks or call the sync endpoint on a
-schedule. `.github/workflows/ci.yml` runs the tests on every push.
+schedule. `.github/workflows/ci.yml` lints the code and runs the tests on every push.
 
 ## Tests and evaluation
 
 ```bash
-python -m unittest -v      # 46 tests; AI model, Ollama, GitHub and Jira are all mocked
+python -m unittest -v      # 51 tests; AI model, Ollama, GitHub and Jira are all mocked
 python evaluate.py         # LLM vs baseline classifier: accuracy, macro-F1, confusion matrices,
                            # duplicates, prompt injection, tokens, cost
 python evaluate_agent.py   # the agent's plans: next step, labels, assignee, corrections, steps
@@ -206,6 +214,7 @@ vague, or prompt injection, and results are reported per case.
 | Access control (AC1–7) | Each role limited to its features; lockout; admin safeguards |
 | Fixes (FX1–4) | Classifier and plan agreement reported separately; lockout expires; bad input returns 400; assigning sends an assign reply, not a request for details |
 | Agent (AG1–5) | Tool-use plan, constraints on assignee and citations, step limit fallback, rules plan for vague issues, approval metrics |
+| Hardening (HD1–5) | Production refuses a weak signing key; no demo accounts and a secure cookie in production; first admin needs a password; more secret formats redacted |
 | Providers (PR1–5) | Ollama needs no key; classification and the agent's tool loop translated to and from Ollama; Ollama down falls back; missing model explained |
 | Ranking (RK1) | Ownership and history rank first; workload lowers score |
 | Pipeline (PL1–7) | Idempotent import, write-back, reporter reply round trip, closing, knowledge-base import, outbox retry after tracker outage, stale labels replaced |
@@ -245,4 +254,5 @@ vague, or prompt injection, and results are reported per case.
 - A reporter's reply is detected on the next sync or webhook; there are no email notifications.
 - Single-process design (SQLite, in-memory login lockout of 15 minutes after 5 failures); a
   production version would use a database server and a job queue for sync.
-- Regex redaction misses names and unusual secret formats.
+- Regex redaction covers emails, phone and card numbers, and common key and token formats
+  (AWS, GitHub, Slack, JWT, private keys), but misses names and unusual formats.

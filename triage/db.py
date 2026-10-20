@@ -1,6 +1,7 @@
 """SQLite storage: users, issues (AI suggestions + human decisions), settings and audit log."""
 import csv
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -149,11 +150,21 @@ def init_db(seed_csv=config.SEED_CSV):
     with connect() as conn:
         conn.executescript(SCHEMA)
         if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-            for username, name, role, modules in DEMO_USERS:
+            if config.seed_demo_users():
+                users = [(u, n, r, m, DEMO_PASSWORD) for u, n, r, m in DEMO_USERS]
+            else:
+                # No demo accounts: create a single administrator from the environment.
+                username = os.getenv("ADMIN_USERNAME", "admin").strip().lower()
+                password = os.getenv("ADMIN_PASSWORD") or ""
+                if len(password) < 12:
+                    raise RuntimeError("Without demo accounts, set ADMIN_PASSWORD (12+ characters) "
+                                       "for the first administrator.")
+                users = [(username, "System administrator", "admin", [], password)]
+            for username, name, role, modules, password in users:
                 conn.execute(
                     "INSERT INTO users (username, display_name, role, password_hash, modules, created_at)"
                     " VALUES (?, ?, ?, ?, ?, ?)",
-                    (username, name, role, generate_password_hash(DEMO_PASSWORD),
+                    (username, name, role, generate_password_hash(password),
                      json.dumps(modules), now()))
         if conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0] == 0 and seed_csv.exists():
             owner = {}

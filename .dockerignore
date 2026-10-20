@@ -1,0 +1,11 @@
+# Keep secrets, local data and tooling out of the image.
+.env
+.venv/
+.git/
+.claude/
+__pycache__/
+*.db
+simulated_tracker.json
+evaluation_*.csv
+evaluation_report.txt
+agent_evaluation*
