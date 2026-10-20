@@ -1,4 +1,5 @@
 """Login, sessions and role-based access control."""
+import time
 from functools import wraps
 
 from flask import g, jsonify, session
@@ -6,19 +7,26 @@ from werkzeug.security import check_password_hash
 
 from . import db
 
-# Failed login attempts per username; reset on success (in memory, per server process).
+# Failed login attempts per username: (count, time of the latest failure). Reset on success
+# or after LOCKOUT_SECONDS, so a guessing attacker cannot lock an account (even admin) forever.
+# In memory, per server process.
 _failed = {}
 MAX_FAILED_LOGINS = 5
+LOCKOUT_SECONDS = 15 * 60
 
 
 def authenticate(username, password):
     """Return (user, error_message)."""
     username = (username or "").strip().lower()
-    if _failed.get(username, 0) >= MAX_FAILED_LOGINS:
-        return None, "Too many failed attempts. Ask an administrator to reset your password."
+    count, last = _failed.get(username, (0, 0.0))
+    if count >= MAX_FAILED_LOGINS:
+        if time.monotonic() - last < LOCKOUT_SECONDS:
+            return None, ("Too many failed attempts. Try again in 15 minutes, "
+                          "or ask an administrator to reset your password.")
+        count = 0  # lockout expired
     row = db.get_user_by_username(username)
     if not row or not check_password_hash(row["password_hash"], password or ""):
-        _failed[username] = _failed.get(username, 0) + 1
+        _failed[username] = (count + 1, time.monotonic())
         return None, "Username or password is incorrect."
     if not row["active"]:
         return None, "This account is deactivated. Contact an administrator."

@@ -11,6 +11,7 @@ from unittest import mock
 
 from app import create_app
 from tests.test_triage import Base, llm_reply
+from triage.db import DEMO_PASSWORD
 from triage import agent, assignment, db, llm
 from triage.integrations import http as tracker_http
 from triage.integrations.base import SyncError, TriageWrite
@@ -231,14 +232,17 @@ class GitHubTests(Base):
 
         def fake(method, url, **kw):
             calls.append((method, url, kw.get("json")))
-            return FakeResponse(200, items if method == "GET" else {})
+            if method == "GET":
+                return FakeResponse(200, [] if url.endswith("/labels") else items)
+            return FakeResponse(200, {})
         with mock.patch.object(tracker_http.requests, "request", side_effect=fake):
             found = gh.fetch_open_issues()
             gh.apply_triage("5", TriageWrite(labels=["priority-high"], priority="high",
                                              assignee="octodev", comment="On it."))
         self.assertEqual([i.key for i in found], ["#5"])
         methods = [(m, u.split("/issues")[1]) for m, u, _ in calls[1:]]
-        self.assertEqual(methods, [("POST", "/5/labels"), ("POST", "/5/assignees"), ("POST", "/5/comments")])
+        self.assertEqual(methods, [("GET", "/5/labels"), ("POST", "/5/labels"),
+                                   ("POST", "/5/assignees"), ("POST", "/5/comments")])
         self.assertIn("[triage-desk]", calls[-1][2]["body"])
 
     # GH2: webhooks are accepted only with a valid signature, then imported and triaged
@@ -262,6 +266,109 @@ class GitHubTests(Base):
             for k in ("GITHUB_TOKEN", "GITHUB_REPO", "GITHUB_WEBHOOK_SECRET"):
                 os.environ.pop(k, None)
             os.environ["TRACKER"] = "simulated"
+
+
+class GitHubPagingAndLabelTests(Base):
+    # GH3: imports follow pages until a short page, so large repositories are fully read
+    def test_gh3_paginates_issues(self):
+        gh = GitHubConnector("token", "acme/shop")
+
+        def issue(n):
+            return {"number": n, "title": "t", "body": "b", "html_url": "u",
+                    "user": {"login": "x"}, "labels": []}
+        pages = [[issue(n) for n in range(1, 101)], [issue(n) for n in range(101, 104)]]
+        with mock.patch.object(tracker_http.requests, "request",
+                               side_effect=[FakeResponse(200, p) for p in pages]) as m:
+            found = gh.fetch_open_issues()
+        self.assertEqual(len(found), 103)
+        self.assertEqual([c.kwargs["params"]["page"] for c in m.call_args_list], [1, 2])
+
+    # GH4: re-triage removes the desk's old priority label but keeps people's own labels
+    def test_gh4_replaces_stale_labels(self):
+        gh = GitHubConnector("token", "acme/shop")
+        calls = []
+
+        def fake(method, url, **kw):
+            calls.append((method, url.split("/issues/9")[1]))
+            if method == "GET":
+                return FakeResponse(200, [{"name": "priority-high"}, {"name": "customer-reported"},
+                                          {"name": "module-payments"}])
+            return FakeResponse(200, {})
+        with mock.patch.object(tracker_http.requests, "request", side_effect=fake):
+            gh.apply_triage("9", TriageWrite(labels=["module-payments", "priority-low"], priority="low"))
+        deleted = [u for m, u in calls if m == "DELETE"]
+        self.assertEqual(deleted, ["/labels/priority-high"])
+
+    # PL7: the simulated tracker also swaps the old priority label on re-triage
+    def test_pl7_simulated_replaces_stale_labels(self):
+        connector = self.app.config["pipeline"].connector
+        connector.apply_triage("SIM-1", TriageWrite(labels=["priority-high", "triage-desk"], priority="high"))
+        connector.apply_triage("SIM-1", TriageWrite(labels=["priority-low", "triage-desk"], priority="low"))
+        labels = next(i for i in connector.state()["issues"] if i["key"] == "SIM-1")["labels"]
+        self.assertIn("priority-low", labels)
+        self.assertNotIn("priority-high", labels)
+
+
+class FixTests(Base):
+    # FX1: lead-vs-classifier and lead-vs-plan agreement are reported separately
+    def test_fx1_agreement_metrics_are_separate(self):
+        self.agent_patch.stop()
+        script = mock.patch.object(agent, "call_agent_model", side_effect=[
+            tool_use("submit_plan", {"type": "bug", "module": "payments", "priority": "critical",
+                                     "action": "assign", "comment_for_reporter": "Thanks.",
+                                     "confidence": 0.9, "summary": "Raised to critical."})])
+        lead = self.as_user("lead")
+        with script:  # classifier says high, agent revises to critical
+            issue = self.submit(lead, "Payments failing", "Card payments fail for every customer today.",
+                                llm_reply(priority="high")).get_json()
+        lead.post(f"/api/issues/{issue['id']}/triage", json={"action": "accept"})
+        m = lead.get("/api/metrics").get_json()
+        self.assertEqual(m["agreement"]["priority"], 0.0)                     # vs classifier
+        self.assertEqual(m["agent"]["classification_kept"]["priority"], 1.0)  # vs plan
+        self.assertEqual(m["accepted"], 1)
+
+    # FX2: the lockout expires instead of blocking an account until restart
+    def test_fx2_lockout_expires(self):
+        from triage import auth
+        client = self.app.test_client()
+        for _ in range(auth.MAX_FAILED_LOGINS):
+            client.post("/api/login", json={"username": "admin", "password": "wrong"})
+
+        def login():
+            return client.post("/api/login", json={"username": "admin", "password": DEMO_PASSWORD})
+        self.assertEqual(login().status_code, 401)
+        later = auth.time.monotonic() + auth.LOCKOUT_SECONDS + 1
+        with mock.patch.object(auth.time, "monotonic", return_value=later):
+            self.assertEqual(login().status_code, 200)
+
+    # FX3: bad input returns 400, not a server error
+    def test_fx3_bad_input_is_400(self):
+        admin = self.as_user("admin")
+        self.assertEqual(admin.get("/api/admin/audit?limit=abc").status_code, 400)
+        os.environ.update(TRACKER="github", GITHUB_TOKEN="t", GITHUB_REPO="acme/shop",
+                          GITHUB_WEBHOOK_SECRET="s3cret")
+        try:
+            client = create_app().test_client()
+            raw = b"not json"
+            sig = "sha256=" + hmac.new(b"s3cret", raw, hashlib.sha256).hexdigest()
+            res = client.post("/api/webhooks/github", data=raw,
+                              headers={"X-GitHub-Event": "issues", "X-Hub-Signature-256": sig})
+            self.assertEqual(res.status_code, 400)
+        finally:
+            for k in ("GITHUB_TOKEN", "GITHUB_REPO", "GITHUB_WEBHOOK_SECRET"):
+                os.environ.pop(k, None)
+            os.environ["TRACKER"] = "simulated"
+
+    # FX4: assigning an issue whose plan suggested asking first does not send the "need more info" text
+    def test_fx4_assign_reply_matches_action(self):
+        lead = self.as_user("lead")
+        issue = self.submit(lead, "Error", "It broke", llm_reply(confidence=0.3)).get_json()
+        plan = lead.get(f"/api/issues/{issue['id']}").get_json()["plan"]["plan"]
+        self.assertEqual(plan["action"], "request_info")
+        res = lead.post(f"/api/issues/{issue['id']}/triage", json={"action": "accept"}).get_json()
+        self.assertNotIn("more information", res["reporter_update"])
+        decision = db.latest_plan(issue["id"])["decision"]
+        self.assertNotIn("comment_for_reporter", decision["changed"])  # kept the proposed reply
 
 
 class JiraTests(Base):
@@ -299,7 +406,9 @@ class JiraTests(Base):
             self.jira().close_issue("SHOP-7", "Fixed.")
         put = calls[0][2]
         self.assertEqual(put["fields"]["priority"]["name"], "Highest")
-        self.assertEqual(put["update"]["labels"], [{"add": "priority-critical"}])
+        self.assertIn({"add": "priority-critical"}, put["update"]["labels"])
+        self.assertIn({"remove": "priority-high"}, put["update"]["labels"])      # old priority cleared
+        self.assertNotIn({"remove": "priority-critical"}, put["update"]["labels"])
         self.assertEqual(calls[1], ("PUT", "/issue/SHOP-7/assignee", {"accountId": "acc-123"}))
         self.assertEqual(calls[-1], ("POST", "/issue/SHOP-7/transitions", {"transition": {"id": "31"}}))
 
