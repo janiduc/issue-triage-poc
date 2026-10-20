@@ -85,6 +85,31 @@ def load_env_file(path=BASE_DIR / ".env"):
             os.environ.setdefault(key.strip(), value)
 
 
+DEFAULT_SECRET_KEYS = {"dev-only-change-me", "replace-with-a-long-random-string"}
+
+
+def is_production() -> bool:
+    """APP_ENV=production (set in the Dockerfile) turns on the safety checks below."""
+    return os.getenv("APP_ENV", "development").lower() == "production"
+
+
 def secret_key() -> str:
-    # Must be set to a long random value outside local demos.
-    return os.getenv("SECRET_KEY", "dev-only-change-me")
+    # Must be set to a long random value outside local demos (see check_production_settings).
+    return os.getenv("SECRET_KEY") or "dev-only-change-me"
+
+
+def seed_demo_users() -> bool:
+    """The seven demo accounts share a published password: on by default only in development."""
+    default = "false" if is_production() else "true"
+    return os.getenv("SEED_DEMO_USERS", default).lower() == "true"
+
+
+def check_production_settings():
+    """Refuse to start in production with settings that would make the deployment unsafe."""
+    if not is_production():
+        return
+    key = secret_key()
+    if key in DEFAULT_SECRET_KEYS or len(key) < 32:
+        raise RuntimeError("APP_ENV=production needs SECRET_KEY set to a random value of at "
+                           "least 32 characters (for example: python -c \"import secrets; "
+                           "print(secrets.token_urlsafe(48))\").")

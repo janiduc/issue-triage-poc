@@ -1,5 +1,5 @@
-# Continuous integration: run the test suite on every push and pull request.
-# The AI model, GitHub and Jira are mocked in the tests, so no secrets are needed here.
+# Continuous integration: lint and run the test suite on every push and pull request.
+# The AI model, Ollama, GitHub and Jira are mocked in the tests, so no secrets are needed here.
 name: tests
 on: [push, pull_request]
 jobs:
@@ -10,7 +10,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install flask requests scikit-learn numpy
+      # Core requirements only: embeddings are optional and the tests use TF-IDF.
+      - run: pip install -r requirements.txt ruff
+      - name: Lint (syntax errors, undefined names, unused imports)
+        run: ruff check --select E9,F .
       - run: python -m unittest -v
         env:
           USE_EMBEDDINGS: "false"

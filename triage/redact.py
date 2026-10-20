@@ -3,6 +3,10 @@ import re
 
 # Order matters: more specific patterns run first.
 _PATTERNS = [
+    ("PRIVATE_KEY", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)),
+    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
+    ("GITHUB_TOKEN", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})\b")),
+    ("SLACK_TOKEN", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
     ("EMAIL", re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")),
     ("AWS_KEY", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("API_KEY", re.compile(r"\b(?:sk|pk|rk)[-_][A-Za-z0-9_-]{16,}\b")),
