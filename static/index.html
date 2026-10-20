@@ -291,7 +291,7 @@ async function viewList(scope) {
       $("#sync-now").onclick = () => runSync($("#sync-now"), $("#sync-msg"), () => viewList(scope));
     }).catch(() => {});
     api("/api/metrics").then((m) => { $("#q-metrics").textContent =
-      `${m.by_status.new} awaiting triage · ${m.reviewed} reviewed · AI priority agreement ${pct(m.agreement.priority)} · backup classifier used ${pct(m.fallback_rate)}`; }).catch(() => {});
+      `${m.by_status.new} awaiting triage · ${m.reviewed} reviewed · first-pass priority kept ${pct(m.agreement.priority)} · backup classifier used ${pct(m.fallback_rate)}`; }).catch(() => {});
   }
   const params = new URLSearchParams({scope});
   if (isQueue) params.set("status", state.status);
@@ -457,7 +457,7 @@ function planPanel(i) {
       <div class="table-wrap"><table class="pick"><thead><tr><th></th><th>Developer</th><th>Score</th></tr></thead><tbody>${candRows}</tbody></table></div>
       <label for="other-dev">Or choose someone else</label><select id="other-dev"><option value="">—</option></select>
       <label for="o-comment">Reply to the reporter ${where ? `(posted on ${where})` : "(shown in their issue list)"}</label>
-      <textarea id="o-comment" style="min-height:80px">${esc(p.comment_for_reporter)}</textarea>
+      <textarea id="o-comment" style="min-height:80px">${esc(p.assign_comment || p.comment_for_reporter)}</textarea>
       <label>Labels</label>
       <div class="labels" id="label-preview"></div>
       <div>${EXTRA.map((l) => `<label class="inline"><input type="checkbox" class="extra" value="${l}" ${extras.includes(l) ? "checked" : ""}>${l}</label>`).join("")}</div>
@@ -545,9 +545,14 @@ async function viewInsights() {
       ${stat(m.total, "issues submitted")} ${stat(m.by_status.new, "awaiting triage")}
       ${stat(m.by_status.needs_info, "waiting on reporters")} ${stat(m.by_status.assigned, "with developers")}
       ${stat(m.by_status.resolved, "resolved")}</div>
-      <h3>How often the lead agreed with the AI</h3>
+      <h3>How often the lead kept the first-pass classification</h3>
+      <p class="hint">Final labels compared with the classifier's initial suggestion, before the agent's plan.</p>
       <div class="stats">${stat(pct(m.agreement.type), "type")} ${stat(pct(m.agreement.module), "module")}
-      ${stat(pct(m.agreement.priority), "priority")} ${stat(`${m.accepted}/${m.reviewed}`, "accepted without changes")}</div>
+      ${stat(pct(m.agreement.priority), "priority")}</div>
+      <h3>How often the lead kept the plan's classification</h3>
+      <p class="hint">Final labels compared with the plan the lead approved, which the agent may have revised.</p>
+      <div class="stats">${stat(pct(m.agent.classification_kept.type), "type")} ${stat(pct(m.agent.classification_kept.module), "module")}
+      ${stat(pct(m.agent.classification_kept.priority), "priority")} ${stat(`${m.accepted}/${m.reviewed}`, "approved without label changes")}</div>
       <h3>Triage agent</h3>
       <div class="stats">${stat(`${m.agent.by_agent}/${m.agent.plans}`, "plans written by the agent (rest by rules)")}
       ${stat(`${m.agent.approved_unchanged}/${m.agent.decided}`, "plans approved without edits")}

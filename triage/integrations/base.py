@@ -76,6 +76,23 @@ class TrackerConnector:
         return None
 
 
+MANAGED_PREFIXES = ("type-", "module-", "priority-")
+
+
+def stale_labels(current, new):
+    """Labels the desk set earlier (type-/module-/priority-) that the new decision replaces.
+    Labels added by people in the tracker are never touched."""
+    return [l for l in current if l.startswith(MANAGED_PREFIXES) and l not in new]
+
+
+def all_managed_labels():
+    """Every type-/module-/priority- label the desk can write (see agent.base_labels)."""
+    from .. import config
+    return ({f"type-{t}".replace("_", "-") for t in config.ISSUE_TYPES}
+            | {f"module-{m}".replace("_", "-") for m in config.MODULES}
+            | {f"priority-{p}" for p in config.PRIORITIES})
+
+
 def with_marker(text):
     return f"{text}\n\n{MARKER}"
 

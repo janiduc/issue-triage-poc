@@ -55,6 +55,11 @@ def sort_queue(rows):
     return rows
 
 
+def proposed_assign_comment(plan):
+    """Reply the plan proposes if the issue is assigned (older plans lack 'assign_comment')."""
+    return plan.get("assign_comment") or plan.get("comment_for_reporter")
+
+
 def view_role_for(issue, user):
     """Which view of an issue this user may see: 'full', 'reporter', or None (no access)."""
     role = user["role"]
@@ -103,7 +108,10 @@ def create_app():
             if final.get(field) and final[field] != proposed["classification"][field]:
                 changed.append(field)
         for field in ("action", "assignee_id", "comment_for_reporter", "question_for_reporter"):
-            if field in final and final[field] != proposed.get(field):
+            expected = proposed.get(field)
+            if field == "comment_for_reporter" and final.get("action") == "assign":
+                expected = proposed_assign_comment(proposed)
+            if field in final and final[field] != expected:
                 changed.append(field)
         db.decide_plan(plan["id"], "edited" if changed else "approved",
                        {"changed": changed, "final": final}, g.user["id"])
@@ -236,7 +244,7 @@ def create_app():
             raise ValidationError("Choose an active developer to assign.")
         comment = data.get("comment")
         if comment is None and proposed:
-            comment = proposed["comment_for_reporter"]
+            comment = proposed_assign_comment(proposed)
         comment = (str(comment or "").strip()[:1500]) or None
         extras = [l for l in (data.get("extra_labels") if "extra_labels" in data
                               else [l for l in (proposed or {}).get("labels", []) if l in EXTRA_LABELS])
@@ -353,6 +361,7 @@ def create_app():
             overridden=sum(r["review_action"] == "override" for r in reviewed),
             fallback_rate=round(sum(r["ai_source"] == "fallback" for r in rows) / len(rows), 2)
             if rows else None,
+            # Lead's final labels vs the first-pass classifier (LLM or backup), not the plan.
             agreement={f: agreement(f) for f in ("type", "module", "priority")},
             avg_latency_ms=avg([r["latency_ms"] for r in rows]),
             avg_tokens_in=avg([r["tokens_in"] for r in llm_rows]),
@@ -369,15 +378,19 @@ def create_app():
         def changed(p, field):
             return field in json.loads(p["decision_json"] or "{}").get("changed", [])
 
+        def kept(field):
+            return round(sum(not changed(p, field) for p in decided) / len(decided), 2) if decided else None
+
         return {
             "plans": len(plans), "by_agent": len(agent_plans),
             "by_rules": sum(p["source"] == "rules" for p in plans),
             "decided": len(decided),
             "approved_unchanged": sum(p["status"] == "approved" for p in decided),
-            "assignee_kept": (round(sum(not changed(p, "assignee_id") for p in decided) / len(decided), 2)
-                              if decided else None),
-            "comment_kept": (round(sum(not changed(p, "comment_for_reporter") for p in decided) / len(decided), 2)
-                             if decided else None),
+            "assignee_kept": kept("assignee_id"),
+            "comment_kept": kept("comment_for_reporter"),
+            # Lead vs the PLAN's classification (agent or rules). The top-level "agreement"
+            # is lead vs the first-pass classifier; the two differ when the agent revises it.
+            "classification_kept": {f: kept(f) for f in ("type", "module", "priority")},
             "avg_steps": avg_of([p["steps"] for p in agent_plans]),
             "avg_tokens_in": avg_of([p["tokens_in"] for p in agent_plans]),
             "avg_tokens_out": avg_of([p["tokens_out"] for p in agent_plans]),
@@ -482,7 +495,11 @@ def create_app():
     @app.get("/api/admin/audit")
     @require_roles("admin")
     def admin_audit():
-        limit = min(int(request.args.get("limit", 100)), 500)
+        try:
+            limit = int(request.args.get("limit", 100))
+        except ValueError:
+            raise ValidationError("limit must be a whole number.")
+        limit = max(1, min(limit, 500))
         return jsonify(db.audit_entries(limit))
 
     # ---------- tracker integration ----------
@@ -558,7 +575,12 @@ def create_app():
         if not c.verify_webhook(request.headers, raw, request.args):
             db.log_sync(None, c.name, "in", "webhook_rejected", False, "bad or missing signature")
             return jsonify(error="Invalid signature."), 401
-        payload = json.loads(raw or b"{}")
+        try:
+            payload = json.loads(raw or b"{}")
+        except ValueError:
+            return jsonify(error="Webhook body must be JSON."), 400
+        if not isinstance(payload, dict):
+            return jsonify(error="Webhook body must be a JSON object."), 400
         event = c.parse_webhook(request.headers, payload)
         if not event:
             return jsonify(handled=False)  # other events are acknowledged and ignored
@@ -585,6 +607,7 @@ def start_background_sync(app, interval):
 
 
 if __name__ == "__main__":
+    config.load_env_file()
     application = create_app()
     interval = int(os.getenv("SYNC_INTERVAL_SECONDS", "0"))
     if interval > 0:

@@ -54,6 +54,24 @@ ROLE_LABELS = {"reporter": "Reporter", "triage_lead": "Triage lead",
 ISSUE_STATUSES = ["new", "needs_info", "assigned", "resolved"]
 
 
+def load_env_file(path=BASE_DIR / ".env"):
+    """Read KEY=value lines from .env into the environment for local runs.
+
+    Variables that are already set win, so a real environment (Docker --env-file, CI) is
+    never overridden. Kept dependency-free on purpose.
+    """
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip().strip('"').strip("'")
+        if value:
+            os.environ.setdefault(key.strip(), value)
+
+
 def secret_key() -> str:
     # Must be set to a long random value outside local demos.
     return os.getenv("SECRET_KEY", "dev-only-change-me")

@@ -5,7 +5,8 @@ Descriptions and comments are Atlassian Document Format (ADF) and are converted 
 """
 from datetime import datetime, timezone
 
-from .base import ExternalIssue, Reply, SyncError, TrackerConnector, is_ours, with_marker
+from .base import (ExternalIssue, Reply, SyncError, TrackerConnector, all_managed_labels,
+                   is_ours, with_marker)
 from .http import call, valid_signature
 
 # Desk priority -> Jira's default priority scheme. Adjust if the project uses custom names.
@@ -114,7 +115,10 @@ class JiraConnector(TrackerConnector):
 
     def apply_triage(self, external_id, write):
         self._req("PUT", f"/issue/{external_id}", json={
-            "update": {"labels": [{"add": l} for l in write.labels]},
+            # Removing a label the issue does not have is a no-op in Jira, so old
+            # type-/module-/priority- labels are cleared without reading them first.
+            "update": {"labels": [{"remove": l} for l in sorted(all_managed_labels() - set(write.labels))]
+                       + [{"add": l} for l in write.labels]},
             "fields": {"priority": {"name": PRIORITY_MAP[write.priority]}}})
         if write.assignee:
             self._req("PUT", f"/issue/{external_id}/assignee", json={"accountId": write.assignee})

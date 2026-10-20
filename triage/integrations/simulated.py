@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import config
-from .base import ExternalIssue, Reply, SyncError, TrackerConnector, is_ours, with_marker
+from .base import ExternalIssue, Reply, SyncError, TrackerConnector, is_ours, stale_labels, with_marker
 
 SEED = config.BASE_DIR / "data" / "simulated_tracker_seed.json"
 
@@ -71,7 +71,8 @@ class SimulatedConnector(TrackerConnector):
     def apply_triage(self, external_id, write):
         state = self._load()
         issue = self._get(state, external_id)
-        issue["labels"] = sorted(set(issue["labels"]) | set(write.labels))
+        stale = set(stale_labels(issue["labels"], write.labels))
+        issue["labels"] = sorted((set(issue["labels"]) - stale) | set(write.labels))
         issue["priority"] = write.priority
         if write.assignee:
             issue["assignee"] = write.assignee

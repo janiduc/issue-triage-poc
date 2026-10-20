@@ -74,7 +74,9 @@ plan with the same shape, so triage never stops.
 
 Every approval is compared with the proposal. The Insights screen shows how often plans were
 approved unchanged and how often the lead kept the proposed assignee and reply — direct
-evidence for evaluating the agent (LO4).
+evidence for evaluating the agent (LO4). It reports agreement twice, because the agent may
+revise the classification: once against the first-pass classifier, and once against the plan
+the lead approved.
 
 ## User roles
 
@@ -104,8 +106,8 @@ Requires Python 3.10+.
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env               # then fill in the values you need and load them
-python app.py
+cp .env.example .env               # then fill in the values you need
+python app.py                      # reads .env; variables already set in the shell win
 ```
 
 Open http://127.0.0.1:5000. Demo accounts all use the password `demo1234`:
@@ -170,7 +172,7 @@ schedule. `.github/workflows/ci.yml` runs the tests on every push.
 ## Tests and evaluation
 
 ```bash
-python -m unittest -v   # 34 tests; AI model, GitHub and Jira are all mocked
+python -m unittest -v   # 41 tests; AI model, GitHub and Jira are all mocked
 python evaluate.py      # LLM vs baseline classifier: accuracy, macro-F1, tokens, cost
 ```
 
@@ -178,10 +180,11 @@ python evaluate.py      # LLM vs baseline classifier: accuracy, macro-F1, tokens
 |---|---|
 | Workflow (TC1–9) | Classification, grounded recommendations, fallbacks, vague input, redaction, prompt injection, end-to-end across roles, request-info round trip |
 | Access control (AC1–7) | Each role limited to its features; lockout; admin safeguards |
+| Fixes (FX1–4) | Classifier and plan agreement reported separately; lockout expires; bad input returns 400; assigning sends an assign reply, not a request for details |
 | Agent (AG1–5) | Tool-use plan, constraints on assignee and citations, step limit fallback, rules plan for vague issues, approval metrics |
 | Ranking (RK1) | Ownership and history rank first; workload lowers score |
-| Pipeline (PL1–6) | Idempotent import, write-back, reporter reply round trip, closing, knowledge-base import, outbox retry after tracker outage |
-| GitHub (GH1–2) | Pull requests skipped, correct write endpoints, signed webhook accepted, unsigned rejected |
+| Pipeline (PL1–7) | Idempotent import, write-back, reporter reply round trip, closing, knowledge-base import, outbox retry after tracker outage, stale labels replaced |
+| GitHub (GH1–4) | Pull requests skipped, correct write endpoints, signed webhook accepted, unsigned rejected, pagination, stale labels replaced |
 | Jira (JR1–3) | ADF conversion, `nextPageToken` pagination, priority mapping, Done transition, missing-transition error |
 
 ## Project structure
@@ -214,7 +217,6 @@ python evaluate.py      # LLM vs baseline classifier: accuracy, macro-F1, tokens
 - The agent's confidence is self-reported and not calibrated.
 - Ranking weights are hand-set; they should be tuned with the team.
 - A reporter's reply is detected on the next sync or webhook; there are no email notifications.
-- Label writes add labels but do not remove old priority labels when priority changes.
-- Single-process design (SQLite, in-memory login lockout); a production version would use a
-  database server and a job queue for sync.
+- Single-process design (SQLite, in-memory login lockout of 15 minutes after 5 failures); a
+  production version would use a database server and a job queue for sync.
 - Regex redaction misses names and unusual secret formats.

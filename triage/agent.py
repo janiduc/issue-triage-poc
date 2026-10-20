@@ -216,11 +216,13 @@ class TriageAgent:
         except (TypeError, ValueError):
             confidence = 0.5
         names = {c["id"]: c["name"] for c in candidates}
+        comment = (str(args.get("comment_for_reporter") or "").strip()[:1500]
+                   or default_comment(action, question))
         plan = {"classification": cls, "action": action, "assignee_id": assignee_id,
                 "assignee_name": names.get(assignee_id), "assignee_reason": reason,
                 "question_for_reporter": question,
-                "comment_for_reporter": str(args.get("comment_for_reporter") or "").strip()[:1500]
-                or default_comment(action, question),
+                "comment_for_reporter": comment,
+                "assign_comment": assign_comment(action, comment),
                 "labels": base_labels(cls) + extras, "duplicate_of": dup,
                 "confidence": round(confidence, 2),
                 "summary": str(args.get("summary") or "")[:300], "notes": notes}
@@ -248,6 +250,12 @@ def default_comment(action, question=None):
             "responsible. We'll update this ticket when there's progress.")
 
 
+def assign_comment(action, comment):
+    """The reply to post if the lead assigns the issue. A request-info plan's comment asks the
+    reporter for details, which would be wrong once the lead chooses to assign instead."""
+    return comment if action == "assign" else default_comment("assign")
+
+
 def rules_plan(issue, index, threshold):
     """Deterministic plan used when the agent is unavailable. Same shape as an agent plan."""
     cls = {"type": issue["ai_type"], "module": issue["ai_module"], "priority": issue["ai_priority"]}
@@ -265,6 +273,7 @@ def rules_plan(issue, index, threshold):
             "assignee_reason": "; ".join(top["reasons"]) if top else "",
             "question_for_reporter": question,
             "comment_for_reporter": default_comment(action, question),
+            "assign_comment": default_comment("assign"),
             "labels": base_labels(cls) + (["duplicate"] if dup else []),
             "duplicate_of": dup, "confidence": issue["ai_confidence"],
             "summary": ("Description is too thin to act on; ask the reporter first." if vague
