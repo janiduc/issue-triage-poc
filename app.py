@@ -23,9 +23,8 @@ from werkzeug.exceptions import HTTPException
 from triage import config, db
 from triage.auth import authenticate, current_user, require_roles, reset_failed_logins
 from triage.agent import EXTRA_LABELS
-from triage.integrations import get_connector
 from triage.integrations.base import SyncError
-from triage.pipeline import Pipeline
+from triage.pipeline import Pipelines
 from triage.service import TriageService, agent_enabled, ai_enabled, confidence_threshold, to_api
 from triage.validation import ValidationError, validate_issue_input
 
@@ -83,8 +82,20 @@ def create_app():
         log.warning("Using the default SECRET_KEY: fine for a local demo, never for a deployment.")
     db.init_db()
     service = TriageService()
-    pipeline = Pipeline(service, get_connector())
-    app.config.update(service=service, pipeline=pipeline)
+    db.sync_env_project()
+    pipelines = Pipelines(service)
+    # "pipeline" = the first project's, kept for single-project callers and tests
+    app.config.update(service=service, pipelines=pipelines, pipeline=pipelines.default())
+
+    def selected_pipeline():
+        """The project named by ?project=<slug> (or "project" in the body), else the first one."""
+        slug = request.args.get("project") or body().get("project")
+        if not slug:
+            return pipelines.default()
+        p = pipelines.by_slug(str(slug))
+        if not p:
+            raise ValidationError("Unknown project.")
+        return p
 
     def load_issue_for(issue_id):
         issue = db.get_issue(issue_id)
@@ -99,7 +110,8 @@ def create_app():
         if g.user["role"] == "triage_lead":
             data["plan"] = db.latest_plan(issue_id)
         if view == "full":
-            data["tracker_label"] = pipeline.connector.label if issue["source"] == pipeline.name else None
+            p = pipelines.for_issue(issue)
+            data["tracker_label"] = p.connector.label if p and issue["source"] == p.name else None
         return jsonify(data), status
 
     def record_plan_decision(issue_id, final):
@@ -270,8 +282,9 @@ def create_app():
         db.audit(g.user["id"], f"triage_{action}", issue_id,
                  {"assignee_id": assignee_id, "changed": changed})
         if data.get("post_to_tracker", True):
-            write = pipeline.triage_write(db.get_issue(issue_id), extras, comment)
-            pipeline.queue(issue_id, "triage", **write)
+            p = pipelines.for_issue(issue)
+            write = p.triage_write(db.get_issue(issue_id), extras, comment)
+            p.queue(issue_id, "triage", **write)
         return issue_response(issue_id)
 
     @app.post("/api/issues/<int:issue_id>/request-info")
@@ -286,7 +299,7 @@ def create_app():
         db.request_info(issue_id, message)
         record_plan_decision(issue_id, {"action": "request_info", "question_for_reporter": message})
         db.audit(g.user["id"], "info_requested", issue_id)
-        pipeline.queue(issue_id, "comment", text=message)
+        pipelines.for_issue(issue).queue(issue_id, "comment", text=message)
         return issue_response(issue_id)
 
     @app.post("/api/issues/<int:issue_id>/replan")
@@ -307,7 +320,7 @@ def create_app():
             return jsonify(error="Issue not found."), 404
         if not issue["sync_pending"]:
             raise ValidationError("Nothing is waiting to be sent for this issue.")
-        pipeline.deliver(issue_id)
+        pipelines.for_issue(issue).deliver(issue_id)
         return issue_response(issue_id)
 
     @app.post("/api/issues/<int:issue_id>/add-info")
@@ -336,7 +349,7 @@ def create_app():
         db.audit(g.user["id"], "issue_resolved", issue_id)
         service.refresh()  # the fix now helps with future similar issues
         if body().get("close_in_tracker", True):
-            pipeline.queue(issue_id, "close", text=f"Resolved: {resolution}")
+            pipelines.for_issue(issue).queue(issue_id, "close", text=f"Resolved: {resolution}")
         return issue_response(issue_id)
 
     @app.get("/api/developers")
@@ -518,27 +531,33 @@ def create_app():
     @app.get("/api/integration")
     @require_roles("triage_lead", "admin")
     def integration_status():
-        c = pipeline.connector
-        return jsonify(tracker=c.name, label=c.label, configured=c.configured(),
-                       last_sync=db.get_setting(f"last_sync_{c.name}"),
-                       pending_writes=len(db.failed_syncs()),
-                       webhook_url=f"/api/webhooks/{c.name}" if c.name in ("github", "jira") else None,
-                       events=db.sync_events(50) if g.user["role"] == "admin" else [])
+        p = selected_pipeline()
+        c, project = p.connector, db.get_project(p.project_id)
+        return jsonify(project=project["slug"], project_name=project["name"],
+                       projects=[{"slug": x["slug"], "name": x["name"], "tracker": x["tracker"]}
+                                 for x in db.list_projects(active_only=True)],
+                       tracker=c.name, label=c.label, configured=c.configured(),
+                       last_sync=project.get("last_sync"),
+                       pending_writes=len(db.failed_syncs(p.project_id)),
+                       webhook_url=f"/api/webhooks/{project['slug']}" if c.name in ("github", "jira") else None,
+                       events=db.sync_events(50, p.project_id) if g.user["role"] == "admin" else [])
 
     @app.post("/api/integration/sync")
     @require_roles("triage_lead", "admin")
     def integration_sync():
+        p = selected_pipeline()
         try:
-            summary = pipeline.sync()
+            summary = p.sync()
         except SyncError as exc:
             return jsonify(error=str(exc)), 400
-        db.audit(g.user["id"], "tracker_sync", detail=summary)
+        db.audit(g.user["id"], "tracker_sync", detail=summary | {"project": p.project["slug"]})
         return jsonify(summary)
 
     def simulated():
-        if pipeline.name != "simulated":
+        p = selected_pipeline()
+        if p.name != "simulated":
             raise ValidationError("The simulated tracker is not in use.")
-        return pipeline.connector
+        return p.connector
 
     @app.get("/api/integration/simulated")
     @require_roles("triage_lead", "admin")
@@ -576,15 +595,28 @@ def create_app():
             return jsonify(error=str(exc)), 404
         return jsonify(ok=True)
 
-    @app.post("/api/webhooks/<tracker>")
-    def webhook(tracker):
+    def webhook_pipeline(slug):
+        """/api/webhooks/<project slug>. The old /api/webhooks/github (or /jira) still works while
+        exactly one active project uses that tracker."""
+        p = pipelines.by_slug(slug)
+        if p is None and slug in ("github", "jira"):
+            matches = [x for x in db.list_projects(active_only=True) if x["tracker"] == slug]
+            p = pipelines.get(matches[0]["id"]) if len(matches) == 1 else None
+        if p is None or not p.project["active"] or p.name not in ("github", "jira"):
+            return None
+        return p
+
+    @app.post("/api/webhooks/<slug>")
+    def webhook(slug):
         """Called by GitHub or Jira. No session: authenticity comes from the HMAC signature."""
-        c = pipeline.connector
-        if tracker != c.name or tracker not in ("github", "jira"):
+        pipeline = webhook_pipeline(slug)
+        if pipeline is None:
             return jsonify(error="Not found."), 404
+        c = pipeline.connector
         raw = request.get_data()
         if not c.verify_webhook(request.headers, raw, request.args):
-            db.log_sync(None, c.name, "in", "webhook_rejected", False, "bad or missing signature")
+            db.log_sync(None, c.name, "in", "webhook_rejected", False, "bad or missing signature",
+                        pipeline.project_id)
             return jsonify(error="Invalid signature."), 401
         try:
             payload = json.loads(raw or b"{}")
@@ -603,16 +635,17 @@ def create_app():
 
 def start_background_sync(app, interval):
     """Optional polling, for trackers that cannot reach this server with webhooks."""
-    pipeline = app.config["pipeline"]
+    pipelines = app.config["pipelines"]
 
     def loop():
         while True:
             threading.Event().wait(interval)
-            try:
-                if pipeline.enabled():
-                    pipeline.sync()
-            except Exception:
-                log.exception("Background sync failed")
+            for pipeline in pipelines.all():  # one failing project never stops the others
+                try:
+                    if pipeline.enabled():
+                        pipeline.sync()
+                except Exception:
+                    log.exception("Background sync failed for project %s", pipeline.project["slug"])
 
     threading.Thread(target=loop, daemon=True).start()
 

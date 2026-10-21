@@ -80,3 +80,85 @@ class ProjectModelTests(Base):
         self.assertEqual(db.find_external("simulated", "SIM-9"), 1)
         old_dev = db.get_user_by_username("old.dev")
         self.assertEqual(db.memberships(old_dev["id"])[project["id"]], {"role": "developer", "modules": ["api"]})
+
+
+class ProjectConnectionTests(Base):
+    def setUp(self):
+        super().setUp()
+        os.environ["SIM_TRACKER_DIR"] = self.tmp.name
+        self.second = db.create_project("second", "Second shop", "simulated")
+        dev = db.get_user_by_username("dev.platform")
+        db.set_membership(self.second, db.get_user_by_username("lead")["id"], "triage_lead")
+        db.set_membership(self.second, dev["id"], "developer", ["payments", "api"])
+
+    def tearDown(self):
+        os.environ.pop("SIM_TRACKER_DIR", None)
+        for k in ("GH_TOKEN_A", "GH_SECRET_A", "GH_TOKEN_B", "GH_SECRET_B"):
+            os.environ.pop(k, None)
+        super().tearDown()
+
+    def sync(self, client, project=None):
+        from unittest import mock
+        from triage import llm
+        url = "/api/integration/sync" + (f"?project={project}" if project else "")
+        with mock.patch.object(llm, "call_model", return_value=llm_reply()):
+            return client.post(url).get_json()
+
+    # PJ6: two projects import the same tracker keys as separate issues and write back separately
+    def test_pj6_two_projects_import_and_write_back_separately(self):
+        lead = self.as_user("lead")
+        self.assertEqual(self.sync(lead)["imported"], 4)
+        self.assertEqual(self.sync(lead, "second")["imported"], 4)
+        first_id = db.find_external("simulated", "SIM-2")
+        second_id = db.find_external("simulated", "SIM-2", project_id=self.second)
+        self.assertNotEqual(first_id, second_id)
+        res = lead.post(f"/api/issues/{second_id}/triage",
+                        json={"action": "accept", "assignee_id": db.get_user_by_username("dev.platform")["id"]})
+        self.assertEqual(res.get_json()["sync_status"], "ok")
+        pipelines = self.app.config["pipelines"]
+        second_state = pipelines.get(self.second).connector.state()
+        first_state = pipelines.default().connector.state()
+        labelled = lambda state: [i["key"] for i in state["issues"] if i["labels"]]
+        self.assertEqual(labelled(second_state), ["SIM-2"])
+        self.assertEqual(labelled(first_state), [])
+        self.assertEqual(db.get_project(self.second)["last_sync"] is not None, True)
+
+    # PJ7: each project's webhook is verified with that project's own secret
+    def test_pj7_webhook_per_project_secret(self):
+        import hashlib, hmac, json
+        from unittest import mock
+        from triage import llm
+        os.environ.update(GH_TOKEN_A="ta", GH_SECRET_A="secret-a", GH_TOKEN_B="tb", GH_SECRET_B="secret-b")
+        db.create_project("repo-a", "acme/repo-a", "github", repo="acme/repo-a",
+                          token_env="GH_TOKEN_A", secret_env="GH_SECRET_A")
+        b = db.create_project("repo-b", "acme/repo-b", "github", repo="acme/repo-b",
+                              token_env="GH_TOKEN_B", secret_env="GH_SECRET_B")
+        client = self.app.test_client()
+        payload = json.dumps({"action": "opened", "issue": {
+            "number": 7, "title": "Login fails", "body": "Users cannot log in since the update.",
+            "html_url": "https://github.com/acme/repo-b/issues/7", "user": {"login": "ann"}}}).encode()
+        sign = lambda secret: "sha256=" + hmac.new(secret, payload, hashlib.sha256).hexdigest()
+        headers = {"X-GitHub-Event": "issues", "Content-Type": "application/json"}
+        wrong = client.post("/api/webhooks/repo-b", data=payload,
+                            headers=headers | {"X-Hub-Signature-256": sign(b"secret-a")})
+        self.assertEqual(wrong.status_code, 401)
+        with mock.patch.object(llm, "call_model", return_value=llm_reply()):
+            ok = client.post("/api/webhooks/repo-b", data=payload,
+                             headers=headers | {"X-Hub-Signature-256": sign(b"secret-b")})
+        self.assertTrue(ok.get_json()["handled"])
+        self.assertIsNotNone(db.find_external("github", "7", project_id=b))
+        self.assertEqual(client.post("/api/webhooks/no-such-project", data=payload).status_code, 404)
+
+    # PJ8: a developer who is not a member of the project is not assigned in its tracker
+    def test_pj8_non_member_not_assigned_in_tracker(self):
+        lead = self.as_user("lead")
+        self.sync(lead, "second")
+        issue_id = db.find_external("simulated", "SIM-1", project_id=self.second)
+        outsider = db.get_user_by_username("dev.frontend")["id"]
+        lead.post(f"/api/issues/{issue_id}/triage", json={"action": "accept", "assignee_id": outsider})
+        state = self.app.config["pipelines"].get(self.second).connector.state()
+        self.assertIsNone(next(i for i in state["issues"] if i["key"] == "SIM-1")["assignee"])
+        with db.connect() as conn:
+            detail = conn.execute("SELECT detail FROM sync_events WHERE issue_id = ? AND action = 'triage'",
+                                  (issue_id,)).fetchone()["detail"]
+        self.assertIn("not a member of this project", detail)

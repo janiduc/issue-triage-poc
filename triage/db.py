@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS projects (
     secret_env TEXT,                     -- NAME of the env variable holding the webhook secret
     modules TEXT NOT NULL,               -- JSON list of this project's modules
     active INTEGER NOT NULL DEFAULT 1,
+    managed_by_env INTEGER NOT NULL DEFAULT 0, -- 1: tracker settings follow .env (the first project)
     last_sync TEXT,
     sync_since TEXT,
     created_at TEXT NOT NULL
@@ -187,6 +188,9 @@ def migrate_projects(conn):
       their current role and modules (an admin needs no membership: admin stays global);
     - moves the old per-tracker sync state onto the project.
     """
+    if "managed_by_env" not in _columns(conn, "projects"):
+        conn.execute("ALTER TABLE projects ADD COLUMN managed_by_env INTEGER NOT NULL DEFAULT 0")
+        conn.execute("UPDATE projects SET managed_by_env = 1 WHERE id = (SELECT MIN(id) FROM projects)")
     for table in PROJECT_COLUMNS:
         if "project_id" not in _columns(conn, table):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN project_id INTEGER REFERENCES projects(id)")
@@ -197,7 +201,8 @@ def migrate_projects(conn):
         p = config.default_project_settings()
         conn.execute(
             "INSERT INTO projects (slug, name, tracker, repo, base_url, token_env, email_env, "
-            "secret_env, modules, last_sync, sync_since, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "secret_env, modules, last_sync, sync_since, created_at, managed_by_env) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)",
             (p["slug"], p["name"], p["tracker"], p.get("repo"), p.get("base_url"), p.get("token_env"),
              p.get("email_env"), p.get("secret_env"), json.dumps(config.MODULES),
              _setting(conn, f"last_sync_{p['tracker']}"), _setting(conn, f"sync_since_{p['tracker']}"),
@@ -299,6 +304,34 @@ def create_project(slug, name, tracker="none", modules=None, **fields):
         cur = conn.execute(f"INSERT INTO projects ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                            values)
         return cur.lastrowid
+
+
+PROJECT_FIELDS = {"name", "tracker", "repo", "base_url", "token_env", "email_env", "secret_env",
+                  "modules", "active", "last_sync", "sync_since", "managed_by_env"}
+
+
+def update_project(project_id, **fields):
+    sets, params = [], []
+    for key, value in fields.items():
+        if key not in PROJECT_FIELDS:
+            continue
+        sets.append(f"{key} = ?")
+        params.append(json.dumps(value) if key == "modules" else value)
+    if sets:
+        with connect() as conn:
+            conn.execute(f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", params + [project_id])
+
+
+def sync_env_project():
+    """The first project's tracker settings follow .env until an administrator edits it."""
+    with connect() as conn:
+        row = conn.execute("SELECT id FROM projects WHERE managed_by_env = 1 ORDER BY id LIMIT 1").fetchone()
+    if not row:
+        return
+    p = config.default_project_settings()
+    update_project(row["id"], tracker=p["tracker"], repo=p.get("repo"), base_url=p.get("base_url"),
+                   token_env=p.get("token_env"), email_env=p.get("email_env"),
+                   secret_env=p.get("secret_env"))
 
 
 def set_membership(project_id, user_id, role, modules=()):
@@ -533,17 +566,23 @@ def set_sync(issue_id, **fields):
                      [v for k, v in fields.items() if k in SYNC_FIELDS] + [issue_id])
 
 
-def linked_issues(source, status):
+def linked_issues(source, status, project_id=None):
+    if project_id is None:
+        project_id = default_project_id()
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM issues WHERE source = ? AND status = ?",
-                            (source, status)).fetchall()
+        rows = conn.execute("SELECT * FROM issues WHERE project_id = ? AND source = ? AND status = ?",
+                            (project_id, source, status)).fetchall()
         return [dict(r) for r in rows]
 
 
-def failed_syncs():
+def failed_syncs(project_id=None):
+    """Issues with tracker writes still to deliver; all projects when project_id is None."""
+    sql, params = "SELECT id FROM issues WHERE sync_pending IS NOT NULL", []
+    if project_id is not None:
+        sql += " AND project_id = ?"
+        params.append(project_id)
     with connect() as conn:
-        return [r["id"] for r in conn.execute(
-            "SELECT id FROM issues WHERE sync_pending IS NOT NULL")]
+        return [r["id"] for r in conn.execute(sql, params)]
 
 
 # ---------- developer history (used for assignee ranking) ----------
@@ -625,10 +664,13 @@ def log_sync(issue_id, tracker, direction, action, ok, detail=None, project_id=N
                      (issue_id, tracker, direction, action, int(ok), detail, now(), project_id))
 
 
-def sync_events(limit=100):
+def sync_events(limit=100, project_id=None):
+    sql, params = "SELECT * FROM sync_events", []
+    if project_id is not None:
+        sql += " WHERE project_id = ?"
+        params.append(project_id)
     with connect() as conn:
-        return [dict(r) for r in conn.execute(
-            "SELECT * FROM sync_events ORDER BY id DESC LIMIT ?", (limit,))]
+        return [dict(r) for r in conn.execute(sql + " ORDER BY id DESC LIMIT ?", params + [limit])]
 
 
 def knowledge_base():
