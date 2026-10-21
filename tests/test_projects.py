@@ -162,3 +162,111 @@ class ProjectConnectionTests(Base):
             detail = conn.execute("SELECT detail FROM sync_events WHERE issue_id = ? AND action = 'triage'",
                                   (issue_id,)).fetchone()["detail"]
         self.assertIn("not a member of this project", detail)
+
+
+class ProjectAdminTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.admin = self.as_user("admin")
+
+    def create(self, **overrides):
+        data = {"slug": "booking", "name": "Booking API", "tracker": "simulated",
+                "modules": ["bookings", "payments", "notifications"]} | overrides
+        return self.admin.post("/api/admin/projects", json=data)
+
+    def uid(self, username):
+        return db.get_user_by_username(username)["id"]
+
+    # PM1: the administrator creates projects; bad input and secrets in place of names are refused
+    def test_pm1_create_project_and_validation(self):
+        res = self.create()
+        self.assertEqual(res.status_code, 201, res.get_json())
+        self.assertEqual(res.get_json()["modules"], ["bookings", "payments", "notifications"])
+        self.assertEqual(self.create().status_code, 400)                          # duplicate slug
+        self.assertEqual(self.create(slug="Bad Slug!").status_code, 400)
+        self.assertEqual(self.create(slug="gh", tracker="github", repo="no-slash").status_code, 400)
+        token_value = "ghp_" + "x" * 36
+        res = self.create(slug="gh2", tracker="github", repo="acme/shop", token_env=token_value)
+        self.assertEqual(res.status_code, 400)                                     # a secret, not a name
+        self.assertIn("environment variable name", res.get_json()["error"])
+        self.assertEqual(self.as_user("lead").get("/api/admin/projects").status_code, 403)
+        listed = self.admin.get("/api/admin/projects").get_json()
+        self.assertEqual([p["slug"] for p in listed], ["simulated", "booking"])
+        self.assertNotIn("title", str(listed))                                    # numbers only, no issue text
+
+    # PM2: add, change and remove members; the user and their other projects are untouched
+    def test_pm2_members_add_change_remove(self):
+        self.create()
+        dev = self.uid("dev.frontend")
+        res = self.admin.post("/api/admin/projects/booking/members",
+                              json={"user_id": dev, "role": "developer", "modules": ["bookings"]})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(self.admin.post("/api/admin/projects/booking/members",
+                                         json={"user_id": self.uid("admin"), "role": "reporter"}).status_code, 400)
+        self.assertEqual(self.admin.post("/api/admin/projects/booking/members",
+                                         json={"user_id": dev, "role": "developer",
+                                               "modules": ["payments"]}).status_code, 400)  # already a member
+        res = self.admin.patch(f"/api/admin/projects/booking/members/{dev}", json={"role": "reporter"})
+        self.assertEqual([m["role"] for m in res.get_json()], ["reporter"])
+        res = self.admin.delete(f"/api/admin/projects/booking/members/{dev}")
+        self.assertEqual(res.get_json(), [])
+        self.assertIsNotNone(db.get_user(dev))
+        self.assertIn(db.default_project_id(), db.memberships(dev))               # other project kept
+        actions = [e["action"] for e in self.admin.get("/api/admin/audit").get_json()]
+        for action in ("project_created", "member_added", "member_role_changed", "member_removed"):
+            self.assertIn(action, actions)
+
+    # PM3: the last lead is protected; a developer with open work is released before removal
+    def test_pm3_removal_safeguards(self):
+        pid = db.default_project_id()
+        lead = self.uid("lead")
+        res = self.admin.delete(f"/api/admin/projects/simulated/members/{lead}")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("only triage lead", res.get_json()["error"])
+        lead_client = self.as_user("lead")
+        issue = self.submit(lead_client, "Refund missing", "A refund did not appear in the account.").get_json()
+        dev = self.uid("dev.payments")
+        lead_client.post(f"/api/issues/{issue['id']}/triage", json={"action": "accept", "assignee_id": dev})
+        res = self.admin.delete(f"/api/admin/projects/simulated/members/{dev}")
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.get_json()["open_issue_count"], 1)
+        res = self.admin.delete(f"/api/admin/projects/simulated/members/{dev}?release=true")
+        self.assertEqual(res.status_code, 200)
+        released = db.get_issue(issue["id"])
+        self.assertEqual((released["status"], released["assignee_id"]), ("new", None))
+        self.assertNotIn(pid, db.memberships(dev))
+
+    # PM4: test connection reports assignable users and members GitHub cannot assign
+    def test_pm4_test_connection(self):
+        from unittest import mock
+        from tests.test_agent_pipeline import FakeResponse
+        from triage.integrations import http as tracker_http
+        os.environ["GH_TOKEN_SHOP"] = "t"
+        try:
+            self.create(slug="shop", tracker="github", repo="acme/shop", token_env="GH_TOKEN_SHOP")
+            dev = self.uid("dev.platform")
+            db.update_user(dev, github_login="platform-dev")
+            self.admin.post("/api/admin/projects/shop/members", json={"user_id": dev, "role": "developer"})
+
+            def fake(method, url, **kw):
+                return FakeResponse(200, [{"login": "someone-else"}] if url.endswith("/assignees") else {"id": 1})
+            with mock.patch.object(tracker_http.requests, "request", side_effect=fake):
+                res = self.admin.post("/api/admin/projects/shop/test").get_json()
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["unassignable"], ["dev.platform"])
+            os.environ.pop("GH_TOKEN_SHOP")
+            res = self.admin.post("/api/admin/projects/shop/test").get_json()     # token variable now empty
+            self.assertFalse(res["ok"])
+        finally:
+            os.environ.pop("GH_TOKEN_SHOP", None)
+
+    # PM5: editing the first project's tracker stops it following .env; archiving deactivates it
+    def test_pm5_edit_and_archive(self):
+        res = self.admin.patch("/api/admin/projects/simulated", json={"tracker": "none"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(db.get_project_by_slug("simulated")["managed_by_env"], 0)
+        db.sync_env_project()
+        self.assertEqual(db.get_project_by_slug("simulated")["tracker"], "none")   # no longer overwritten
+        self.create()
+        self.admin.patch("/api/admin/projects/booking", json={"active": False})
+        self.assertFalse(db.get_project_by_slug("booking")["active"])

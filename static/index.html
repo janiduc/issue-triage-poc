@@ -122,6 +122,7 @@
   .labels span { display: inline-block; border: 1px solid var(--rule); border-radius: 999px; padding: 0 8px; margin: 2px 4px 2px 0; font-size: .85rem; }
   .comments { margin: 6px 0 0; padding-left: 18px; font-size: .9rem; }
   .inline-input { max-width: 180px; padding: 4px 6px; font-size: .9rem; }
+  #pa-role { max-width: 200px; }
 </style>
 </head>
 <body>
@@ -172,7 +173,7 @@ const VIEWS = {
   reporter:    [["report", "Report an issue"], ["mine", "My issues"]],
   triage_lead: [["queue", "Triage queue"], ["insights", "Insights"], ["tracker", "Tracker"], ["report", "Report an issue"]],
   developer:   [["assigned", "My assignments"], ["report", "Report an issue"], ["mine", "Issues I reported"]],
-  admin:       [["users", "Users and roles"], ["settings", "AI settings"], ["tracker", "Tracker"], ["audit", "Activity log"], ["insights", "Insights"]],
+  admin:       [["projects", "Projects"], ["users", "Users and roles"], ["settings", "AI settings"], ["tracker", "Tracker"], ["audit", "Activity log"], ["insights", "Insights"]],
 };
 
 const state = { user: null, options: null, view: null, status: "new", selected: null };
@@ -227,7 +228,7 @@ function go(view) {
     ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"));
   ({report: viewReport, mine: () => viewList("mine"), assigned: () => viewList("assigned"),
     queue: () => viewList("all"), insights: viewInsights, users: viewUsers,
-    settings: viewSettings, audit: viewAudit, tracker: viewTracker})[view]();
+    settings: viewSettings, audit: viewAudit, tracker: viewTracker, projects: viewProjects})[view]();
 }
 
 /* ---------- report an issue (reporter, developer, lead) ---------- */
@@ -623,6 +624,130 @@ async function viewUsers() {
             (err) => msg($("#nu-msg"), "error", err.message));
   };
   load().catch((e) => msg($("#users-msg"), "error", e.message));
+}
+
+/* ---------- projects (admin): one per repository ---------- */
+
+const TRACKER_NAMES = {github: "GitHub Issues", jira: "Jira", simulated: "Simulated tracker", none: "No tracker"};
+const PROJECT_ROLE_LABELS = {triage_lead: "Triage lead", developer: "Developer", reporter: "Reporter"};
+
+async function viewProjects() {
+  $("#view").innerHTML = `<div class="split">
+    <section><h2>Projects</h2>
+      <p class="hint">Each project is one repository with its own tracker connection, team, modules and knowledge. You see counts only, never issue content.</p>
+      <ul class="list" id="proj-list"></ul>
+      <h3>Add a project</h3>
+      <form id="proj-new">
+        <label for="pn-name">Name</label><input id="pn-name" placeholder="e.g. Booking API">
+        <label for="pn-slug">Short name (used in URLs)</label><input id="pn-slug" placeholder="e.g. booking-api">
+        <label for="pn-tracker">Tracker</label>${selectHtml("pn-tracker", Object.keys(TRACKER_NAMES), "github", TRACKER_NAMES)}
+        <label for="pn-repo">GitHub repository (owner/name)</label><input id="pn-repo" placeholder="e.g. janiduc/booking-api">
+        <div class="row"><button type="submit">Add project</button></div>
+        <div id="pn-msg" role="alert"></div>
+      </form></section>
+    <section id="proj-detail"><p class="empty">Select a project to manage its connection and members.</p></section></div>`;
+  const msg = (el, cls, text) => { el.className = cls; el.textContent = text; };
+
+  async function loadList(select) {
+    const projects = await api("/api/admin/projects");
+    $("#proj-list").innerHTML = projects.map((p) => {
+      const s = p.by_status || {};
+      return `<li><button class="item" data-slug="${esc(p.slug)}" aria-pressed="${p.slug === select}">
+        <div class="tag"><div class="title">${esc(p.name)} ${p.active ? "" : '<span class="ext">archived</span>'}</div>
+        <div class="meta">${esc(TRACKER_NAMES[p.tracker])}${p.repo ? " · " + esc(p.repo) : ""} · ${p.members} member(s) ·
+          ${s.new || 0} awaiting triage · ${s.assigned || 0} with developers ·
+          <span class="${p.configured ? "sync-ok" : "sync-failed"}">${p.configured ? "connected" : "not connected"}</span></div></div></button></li>`;
+    }).join("");
+    $$("#proj-list button.item").forEach((b) => b.onclick = () => openProject(b.dataset.slug));
+    if (select) openProject(select);
+  }
+
+  async function openProject(slug) {
+    $$("#proj-list button.item").forEach((b) => b.setAttribute("aria-pressed", b.dataset.slug === slug));
+    const [projects, members, users] = await Promise.all([api("/api/admin/projects"),
+      api(`/api/admin/projects/${slug}/members`), api("/api/admin/users")]);
+    const p = projects.find((x) => x.slug === slug);
+    const memberIds = new Set(members.map((m) => m.user_id));
+    const candidates = users.filter((u) => u.role !== "admin" && !memberIds.has(u.id) && u.active);
+    const moduleBoxes = (m) => p.modules.map((mod) => `<label class="inline"><input type="checkbox" value="${esc(mod)}" ${m.modules.includes(mod) ? "checked" : ""} ${m.role === "developer" ? "" : "disabled"}>${esc(nice(mod))}</label>`).join("");
+    $("#proj-detail").innerHTML = `<h2>${esc(p.name)}</h2>
+      <p class="hint">Short name <code>${esc(p.slug)}</code>${p.webhook_url ? ` · webhook <code>${location.origin}${esc(p.webhook_url)}</code> (events: Issues, Issue comments)` : ""}</p>
+      <h3>Tracker connection</h3>
+      <label for="pe-tracker">Tracker</label>${selectHtml("pe-tracker", Object.keys(TRACKER_NAMES), p.tracker, TRACKER_NAMES)}
+      <label for="pe-repo">Repository (owner/name) or Jira project key</label><input id="pe-repo" value="${esc(p.repo || "")}">
+      <label for="pe-url">Jira site URL (Jira only)</label><input id="pe-url" value="${esc(p.base_url || "")}">
+      <label for="pe-token">Name of the environment variable holding the token</label><input id="pe-token" value="${esc(p.token_env || "")}" placeholder="e.g. GITHUB_TOKEN_BOOKING">
+      <label for="pe-secret">Name of the environment variable holding the webhook secret</label><input id="pe-secret" value="${esc(p.secret_env || "")}" placeholder="e.g. GITHUB_WEBHOOK_SECRET_BOOKING">
+      <p class="hint">Secrets stay in the server's .env; only their names are stored here.</p>
+      <label for="pe-modules">Modules (comma separated)</label><input id="pe-modules" value="${esc(p.modules.join(", "))}">
+      <div class="row"><button id="pe-save">Save project</button><button class="secondary" id="pe-test">Test connection</button>
+        <button class="secondary" id="pe-archive">${p.active ? "Archive project" : "Restore project"}</button></div>
+      <div id="pe-msg" role="alert"></div>
+      <h3>Members</h3>
+      <div class="table-wrap"><table><thead><tr><th>Member</th><th>Role in this project</th><th>Modules owned</th><th></th></tr></thead>
+        <tbody id="pm-rows">${members.length ? members.map((m) => `<tr data-id="${m.user_id}">
+          <td><b>${esc(m.display_name)}</b><div class="hint">${esc(m.username)}${m.github_login ? " · GitHub " + esc(m.github_login) : ""}</div></td>
+          <td>${selectHtml(`pm-role-${m.user_id}`, Object.keys(PROJECT_ROLE_LABELS), m.role, PROJECT_ROLE_LABELS)}</td>
+          <td>${moduleBoxes(m)}</td>
+          <td><button class="secondary pm-save">Save</button> <button class="secondary pm-remove">Remove from project</button></td></tr>`).join("")
+          : `<tr><td colspan="4" class="empty">No members yet.</td></tr>`}</tbody></table></div>
+      <div id="pm-msg" role="alert"></div>
+      <h3>Add a member</h3>
+      ${candidates.length ? `<div class="row" style="margin-top:0">
+        <select id="pa-user" style="max-width:260px">${candidates.map((u) => `<option value="${u.id}">${esc(u.display_name)} (${esc(u.username)})</option>`).join("")}</select>
+        ${selectHtml("pa-role", Object.keys(PROJECT_ROLE_LABELS), "developer", PROJECT_ROLE_LABELS)}
+        <button id="pa-add">Add to project</button></div>` : `<p class="hint">Every active user is already a member.</p>`}`;
+
+    const fail = (el) => (e) => msg(el, "error", e.message);
+    $("#pe-save").onclick = () => post(`/api/admin/projects/${slug}`, {
+      tracker: $("#pe-tracker").value, repo: $("#pe-repo").value, base_url: $("#pe-url").value,
+      token_env: $("#pe-token").value, secret_env: $("#pe-secret").value,
+      modules: $("#pe-modules").value.split(",").map((s) => s.trim()).filter(Boolean)}, "PATCH")
+      .then(() => { loadList(slug); }, fail($("#pe-msg")));
+    $("#pe-test").onclick = () => post(`/api/admin/projects/${slug}/test`, {}).then((r) => {
+      let text = r.message;
+      if (r.unassignable && r.unassignable.length) text += ` GitHub cannot assign: ${r.unassignable.join(", ")} (check their GitHub login and repository access).`;
+      msg($("#pe-msg"), r.ok ? "success" : "error", text);
+    }, fail($("#pe-msg")));
+    $("#pe-archive").onclick = () => post(`/api/admin/projects/${slug}`, {active: !p.active}, "PATCH")
+      .then(() => loadList(slug), fail($("#pe-msg")));
+    if ($("#pa-add")) $("#pa-add").onclick = () => post(`/api/admin/projects/${slug}/members`,
+      {user_id: +$("#pa-user").value, role: $("#pa-role").value}).then(() => openProject(slug), fail($("#pm-msg")));
+    $$("#pm-rows tr[data-id]").forEach((tr) => {
+      const id = +tr.dataset.id, m = members.find((x) => x.user_id === id);
+      $(`#pm-role-${id}`).onchange = () => $$('input[type="checkbox"]', tr).forEach((c) => c.disabled = $(`#pm-role-${id}`).value !== "developer");
+      $(".pm-save", tr).onclick = () => post(`/api/admin/projects/${slug}/members/${id}`, {
+        role: $(`#pm-role-${id}`).value,
+        modules: $$('input[type="checkbox"]', tr).filter((c) => c.checked).map((c) => c.value)}, "PATCH")
+        .then(() => { openProject(slug); }, fail($("#pm-msg")));
+      $(".pm-remove", tr).onclick = async () => {
+        if (!confirm(`Remove ${m.display_name} (${PROJECT_ROLE_LABELS[m.role]}) from ${p.name}? Their account and other projects are not affected.`)) return;
+        try { await api(`/api/admin/projects/${slug}/members/${id}`, {method: "DELETE"}); openProject(slug); loadList(slug); }
+        catch (e) {
+          if (/open assignments/.test(e.message) && confirm(`${m.display_name} still has open assignments in ${p.name}. Send them back to the lead's queue and remove the member?`)) {
+            api(`/api/admin/projects/${slug}/members/${id}?release=true`, {method: "DELETE"})
+              .then(() => { openProject(slug); loadList(slug); }, fail($("#pm-msg")));
+          } else msg($("#pm-msg"), "error", e.message);
+        }
+      };
+    });
+  }
+
+  $("#proj-new").onsubmit = (e) => {
+    e.preventDefault();
+    post("/api/admin/projects", {name: $("#pn-name").value, slug: $("#pn-slug").value,
+      tracker: $("#pn-tracker").value, repo: $("#pn-repo").value, modules: []})
+      .then((p) => { e.target.reset(); msg($("#pn-msg"), "success", `Added ${p.name}. Fill in its connection on the right.`); loadList(p.slug); },
+            (err) => {
+              // GitHub and Jira need connection details first: create it with no tracker, then edit.
+              if (/repository|Jira/.test(err.message)) {
+                post("/api/admin/projects", {name: $("#pn-name").value, slug: $("#pn-slug").value, tracker: "none", modules: []})
+                  .then((p) => { e.target.reset(); msg($("#pn-msg"), "success", `Added ${p.name}. Choose its tracker and fill in the connection on the right.`); loadList(p.slug); },
+                        (err2) => msg($("#pn-msg"), "error", err2.message));
+              } else msg($("#pn-msg"), "error", err.message);
+            });
+  };
+  loadList().catch((e) => msg($("#pn-msg"), "error", e.message));
 }
 
 async function viewSettings() {

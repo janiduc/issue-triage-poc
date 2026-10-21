@@ -95,6 +95,9 @@ class SimulatedConnector(TrackerConnector):
         issue["state"], issue["closed_at"] = "closed", _now()
         self._save(state)
 
+    def check(self):
+        return {"ok": True, "message": "Simulated tracker ready.", "assignable": []}
+
     def account_for(self, user_row):
         return user_row["username"] if user_row else None
 

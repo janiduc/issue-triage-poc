@@ -18,7 +18,7 @@ import re
 import threading
 
 from flask import Flask, g, jsonify, request, send_from_directory, session
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import HTTPException, NotFound
 
 from triage import config, db
 from triage.auth import authenticate, current_user, require_roles, reset_failed_logins
@@ -32,6 +32,12 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("triage")
 
 USERNAME_RE = re.compile(r"^[a-z0-9._-]{3,30}$")
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+MODULE_RE = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
+TRACKERS = ("github", "jira", "simulated", "none")
+PROJECT_ROLES = ("triage_lead", "developer", "reporter")
 
 
 def body():
@@ -525,6 +531,175 @@ def create_app():
             raise ValidationError("limit must be a whole number.")
         limit = max(1, min(limit, 500))
         return jsonify(db.audit_entries(limit))
+
+    # ---------- projects (administrator) ----------
+
+    def project_or_404(slug):
+        project = db.get_project_by_slug(slug)
+        if not project:
+            raise NotFound("Project not found.")
+        return project
+
+    def clean_project(data, existing=None):
+        """Validate project fields. Secrets are never accepted: only env variable NAMES."""
+        out = {}
+        if "name" in data or not existing:
+            out["name"] = text_field(data, "name", 2, "Project name")[:100]
+        tracker = data.get("tracker", (existing or {}).get("tracker", "none"))
+        if tracker not in TRACKERS:
+            raise ValidationError("Tracker must be github, jira, simulated or none.")
+        out["tracker"] = tracker
+        for key in ("repo", "base_url", "token_env", "email_env", "secret_env"):
+            if key in data:
+                out[key] = (str(data[key] or "").strip() or None)
+        merged = {**(existing or {}), **out}
+        for key in ("token_env", "email_env", "secret_env"):
+            if merged.get(key) and not ENV_NAME_RE.match(merged[key]):
+                raise ValidationError("Secrets are referenced by environment variable name, "
+                                      "for example GITHUB_TOKEN_SHOP (capitals, digits, underscores).")
+        if tracker == "github" and not REPO_RE.match(merged.get("repo") or ""):
+            raise ValidationError("GitHub repository must be owner/name.")
+        if tracker == "jira" and not (str(merged.get("base_url") or "").startswith("https://")
+                                      and merged.get("repo")):
+            raise ValidationError("Jira needs an https:// site URL and a project key.")
+        if "modules" in data or not existing:
+            modules = data.get("modules") or config.MODULES
+            if (not isinstance(modules, list) or not 1 <= len(modules) <= 20
+                    or any(not MODULE_RE.match(str(m)) for m in modules) or len(set(modules)) != len(modules)):
+                raise ValidationError("Modules: 1 to 20 distinct names of lowercase letters, digits or _.")
+            out["modules"] = modules
+        if "active" in data:
+            out["active"] = int(bool(data["active"]))
+        return out
+
+    def project_summary(project):
+        p = pipelines.get(project["id"])
+        return project | db.project_counts(project["id"]) | {
+            "configured": bool(p and p.connector.configured()),
+            "webhook_url": f"/api/webhooks/{project['slug']}" if project["tracker"] in ("github", "jira") else None}
+
+    @app.get("/api/admin/projects")
+    @require_roles("admin")
+    def admin_projects():
+        return jsonify([project_summary(p) for p in db.list_projects()])
+
+    @app.post("/api/admin/projects")
+    @require_roles("admin")
+    def admin_create_project():
+        data = body()
+        slug = str(data.get("slug") or "").strip().lower()
+        if not SLUG_RE.match(slug):
+            raise ValidationError("Short name: 2 to 40 lowercase letters, digits or dashes.")
+        if db.get_project_by_slug(slug):
+            raise ValidationError("A project with that short name already exists.")
+        fields = clean_project(data)
+        project_id = db.create_project(slug, fields.pop("name"), fields.pop("tracker"), fields.pop("modules"),
+                                       **{k: v for k, v in fields.items() if k != "active"})
+        db.audit(g.user["id"], "project_created", detail={"project": slug})
+        return jsonify(project_summary(db.get_project(project_id))), 201
+
+    @app.patch("/api/admin/projects/<slug>")
+    @require_roles("admin")
+    def admin_update_project(slug):
+        project = project_or_404(slug)
+        fields = clean_project(body(), project)
+        tracker_keys = {"tracker", "repo", "base_url", "token_env", "email_env", "secret_env"}
+        if any(k in body() for k in tracker_keys):
+            fields["managed_by_env"] = 0  # edited by an administrator: stop following .env
+        db.update_project(project["id"], **fields)
+        db.audit(g.user["id"], "project_updated", detail={"project": slug, "changed": sorted(body())})
+        return jsonify(project_summary(db.get_project(project["id"])))
+
+    @app.post("/api/admin/projects/<slug>/test")
+    @require_roles("admin")
+    def admin_test_project(slug):
+        project = project_or_404(slug)
+        result = pipelines.get(project["id"]).connector.check()
+        members = db.project_members(project["id"])
+        if result["ok"] and project["tracker"] == "github":
+            logins = {a.lower() for a in result["assignable"]}
+            result["unassignable"] = [m["username"] for m in members if m["project_role"] == "developer"
+                                      and (m.get("github_login") or "").lower() not in logins]
+        db.audit(g.user["id"], "project_tested", detail={"project": slug, "ok": result["ok"]})
+        return jsonify(result)
+
+    @app.get("/api/admin/projects/<slug>/members")
+    @require_roles("admin")
+    def admin_project_members(slug):
+        project = project_or_404(slug)
+        return jsonify([{"user_id": m["id"], "username": m["username"], "display_name": m["display_name"],
+                         "role": m["project_role"], "modules": m["project_modules"],
+                         "github_login": m.get("github_login"), "active": m["active"]}
+                        for m in db.project_members(project["id"])])
+
+    def clean_member(project, data, role=None):
+        role = data.get("role", role)
+        if role not in PROJECT_ROLES:
+            raise ValidationError("Role must be triage lead, developer or reporter.")
+        modules = data.get("modules") or []
+        if role != "developer":
+            modules = []
+        elif not isinstance(modules, list) or any(m not in project["modules"] for m in modules):
+            raise ValidationError("Unknown module for this project.")
+        return role, modules
+
+    def last_lead(project, user_id):
+        leads = [m for m in db.project_members(project["id"]) if m["project_role"] == "triage_lead"]
+        return project["active"] and len(leads) == 1 and leads[0]["id"] == user_id
+
+    @app.post("/api/admin/projects/<slug>/members")
+    @require_roles("admin")
+    def admin_add_member(slug):
+        project = project_or_404(slug)
+        data = body()
+        user = db.get_user(data.get("user_id")) if data.get("user_id") else None
+        if not user or user["role"] == "admin":
+            raise ValidationError("Choose a user who is not an administrator.")
+        if user["id"] in {m["id"] for m in db.project_members(project["id"])}:
+            raise ValidationError("That user is already a member; change their role instead.")
+        role, modules = clean_member(project, data)
+        db.set_membership(project["id"], user["id"], role, modules)
+        db.audit(g.user["id"], "member_added", detail={"project": slug, "user_id": user["id"], "role": role})
+        return admin_project_members(slug)
+
+    @app.patch("/api/admin/projects/<slug>/members/<int:user_id>")
+    @require_roles("admin")
+    def admin_update_member(slug, user_id):
+        project = project_or_404(slug)
+        current = db.memberships(user_id).get(project["id"])
+        if not current:
+            raise NotFound("Not a member of this project.")
+        role, modules = clean_member(project, body(), current["role"])
+        if current["role"] == "triage_lead" and role != "triage_lead" and last_lead(project, user_id):
+            raise ValidationError("This is the project's only triage lead. Add another lead first.")
+        if current["role"] == "developer" and role != "developer" and db.open_assignments(project["id"], user_id):
+            raise ValidationError("This developer still has open assignments in the project; "
+                                  "reassign them or remove the member with release.")
+        db.set_membership(project["id"], user_id, role, modules)
+        db.audit(g.user["id"], "member_role_changed", detail={
+            "project": slug, "user_id": user_id, "from": current["role"], "to": role})
+        return admin_project_members(slug)
+
+    @app.delete("/api/admin/projects/<slug>/members/<int:user_id>")
+    @require_roles("admin")
+    def admin_remove_member(slug, user_id):
+        """Remove one membership. The user and their other projects are untouched."""
+        project = project_or_404(slug)
+        current = db.memberships(user_id).get(project["id"])
+        if not current:
+            raise NotFound("Not a member of this project.")
+        if current["role"] == "triage_lead" and last_lead(project, user_id):
+            raise ValidationError("This is the project's only triage lead. Add another lead first.")
+        open_ids = db.open_assignments(project["id"], user_id)
+        if open_ids and request.args.get("release") != "true":
+            return jsonify(error="This developer still has open assignments in the project.",
+                           open_issue_count=len(open_ids)), 409
+        if open_ids:
+            db.release_assignments(project["id"], user_id)
+        db.remove_membership(project["id"], user_id)
+        db.audit(g.user["id"], "member_removed", detail={
+            "project": slug, "user_id": user_id, "role": current["role"], "released": len(open_ids)})
+        return admin_project_members(slug)
 
     # ---------- tracker integration ----------
 

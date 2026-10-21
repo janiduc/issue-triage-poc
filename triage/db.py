@@ -369,6 +369,30 @@ def project_members(project_id):
     return out
 
 
+def project_counts(project_id):
+    """Numbers only (the administrator never sees issue content)."""
+    with connect() as conn:
+        rows = conn.execute("SELECT status, COUNT(*) AS n FROM issues WHERE project_id = ? AND is_seed = 0 "
+                            "GROUP BY status", (project_id,)).fetchall()
+        members = conn.execute("SELECT COUNT(*) FROM project_members WHERE project_id = ?",
+                               (project_id,)).fetchone()[0]
+    return {"by_status": {r["status"]: r["n"] for r in rows}, "members": members}
+
+
+def open_assignments(project_id, user_id):
+    with connect() as conn:
+        return [r["id"] for r in conn.execute(
+            "SELECT id FROM issues WHERE project_id = ? AND assignee_id = ? AND status = 'assigned'",
+            (project_id, user_id))]
+
+
+def release_assignments(project_id, user_id):
+    """Send a developer's open issues in a project back to the lead's queue."""
+    with connect() as conn:
+        conn.execute("UPDATE issues SET status = 'new', assignee_id = NULL WHERE project_id = ? "
+                     "AND assignee_id = ? AND status = 'assigned'", (project_id, user_id))
+
+
 def _sync_default_membership(user_id):
     """Phase 1 compatibility: a user's global role and modules mirror into the first project."""
     user = get_user(user_id)

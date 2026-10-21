@@ -63,6 +63,10 @@ class TrackerConnector:
     def close_issue(self, external_id, comment):
         raise SyncError("No tracker configured")
 
+    def check(self):
+        """Test the connection. Returns {"ok", "message", "assignable": [logins]}."""
+        return {"ok": False, "message": "No tracker configured for this project.", "assignable": []}
+
     def account_for(self, user_row):
         """The tracker account of a desk user, or None if not mapped."""
         return None

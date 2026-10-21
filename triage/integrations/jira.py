@@ -137,6 +137,16 @@ class JiraConnector(TrackerConnector):
             raise SyncError("Jira: no transition to a Done status is available for this issue")
         self._req("POST", f"/issue/{external_id}/transitions", json={"transition": {"id": done[0]["id"]}})
 
+    def check(self):
+        if not self.configured():
+            return {"ok": False, "assignable": [],
+                    "message": "Jira URL, email, token or project key missing."}
+        try:
+            self._req("GET", f"/project/{self.project}")
+        except SyncError as exc:
+            return {"ok": False, "message": str(exc), "assignable": []}
+        return {"ok": True, "message": f"Connected to Jira project {self.project}.", "assignable": []}
+
     def account_for(self, user_row):
         return user_row["jira_account_id"] if user_row else None
 
