@@ -110,6 +110,8 @@ class Pipeline:
     def sync(self):
         if not self.enabled():
             raise SyncError("No issue tracker is configured")
+        if not db.get_project(self.project_id)["active"]:
+            raise SyncError("This project is archived; imports are stopped")
         project = db.get_project(self.project_id)
         since, started = project.get("sync_since"), db.now()
         summary = {"imported": 0, "replies": 0, "closed": 0, "retried": 0, "errors": []}
@@ -161,7 +163,7 @@ class Pipeline:
         """Add a write-back to the outbox and try to deliver it now. Returns None if not linked."""
         issue = db.get_issue(issue_id)
         if (not issue or issue["source"] != self.name or issue["project_id"] != self.project_id
-                or not self.enabled()):
+                or not self.enabled() or not db.get_project(self.project_id)["active"]):
             return None
         outbox = json.loads(issue["sync_pending"] or "[]")
         outbox.append({"action": action, **payload})
@@ -181,6 +183,8 @@ class Pipeline:
                  else f"{dev['display_name']} has no {self.connector.label} account mapped; not assigned there")}
 
     def deliver(self, issue_id):
+        if not db.get_project(self.project_id)["active"]:
+            return False  # archived: nothing more is written to its tracker
         issue = db.get_issue(issue_id)
         outbox = json.loads(issue["sync_pending"] or "[]")
         while outbox:

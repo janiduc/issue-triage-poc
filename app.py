@@ -118,7 +118,14 @@ def create_app():
         return project
 
     def selected_pipeline():
-        return pipelines.get(scoped_project("triage_lead")["id"])
+        project = scoped_project("triage_lead")
+        if not project["active"] and request.method != "GET":
+            raise ValidationError("This project is archived: imports and tracker updates are stopped.")
+        return pipelines.get(project["id"])
+
+    def require_active(issue):
+        if not db.get_project(issue["project_id"])["active"]:
+            raise ValidationError("This project is archived; its issues are read-only.")
 
     def require_project_role(issue, *roles):
         """404 (not 403) when the user lacks the role in the issue's project, so it stays hidden."""
@@ -187,8 +194,10 @@ def create_app():
     @app.get("/api/public-config")
     def public_config():
         """What the sign-in page may show before anyone signs in."""
-        demo = db.get_user_by_username("lead") is not None and config.seed_demo_users()
-        return jsonify(demo_accounts=demo)
+        if config.is_production() or not config.seed_demo_users():
+            return jsonify(demo_accounts=False, accounts=[])
+        accounts = db.demo_accounts(db.DEMO_PASSWORD)
+        return jsonify(demo_accounts=bool(accounts), accounts=accounts)
 
     @app.post("/api/login")
     def login():
@@ -245,7 +254,7 @@ def create_app():
     def create_issue():
         data = validate_issue_input(request.get_json(silent=True))
         slug = body().get("project")
-        member_of = sorted(g.user["projects"])
+        member_of = [pid for pid in sorted(g.user["projects"]) if (db.get_project(pid) or {}).get("active")]
         if slug:
             project = db.get_project_by_slug(str(slug))
             if not project or project["id"] not in g.user["projects"] or not project["active"]:
@@ -273,15 +282,15 @@ def create_app():
         if status and status not in config.ISSUE_STATUSES:
             raise ValidationError("Unknown status.")
         if scope == "all":  # one project's queue, for its triage lead
-            rows = db.list_issues(status=status, project_id=scoped_project("triage_lead")["id"])
-            out = [to_api(r, "triage_lead") for r in sort_queue(rows)]
+            rows, shape = db.list_issues(status=status, project_id=scoped_project("triage_lead")["id"]), "triage_lead"
         elif scope == "assigned":  # across every project where the user develops
             rows = [r for r in db.list_issues(status=status, assignee_id=g.user["id"])
                     if project_role(g.user, r["project_id"]) == "developer"]
-            out = [to_api(r, "developer") for r in sort_queue(rows)]
+            shape = "developer"
         else:
-            out = [to_api(r, "reporter") for r in sort_queue(db.list_issues(status=status,
-                                                                            reporter_id=g.user["id"]))]
+            rows, shape = db.list_issues(status=status, reporter_id=g.user["id"]), "reporter"
+        names = {p["id"]: p["name"] for p in db.list_projects()}
+        out = [to_api(r, shape) | {"project_name": names.get(r["project_id"])} for r in sort_queue(rows)]
         return jsonify(out)
 
     @app.get("/api/issues/<int:issue_id>")
@@ -300,6 +309,7 @@ def create_app():
         if not issue:
             return jsonify(error="Issue not found."), 404
         require_project_role(issue, "triage_lead")
+        require_active(issue)
         if issue["status"] != "new":
             raise ValidationError("Only issues awaiting triage can be triaged.")
         data = body()
@@ -352,6 +362,7 @@ def create_app():
         if not issue:
             return jsonify(error="Issue not found."), 404
         require_project_role(issue, "triage_lead")
+        require_active(issue)
         if issue["status"] != "new":
             raise ValidationError("You can only ask for information on issues awaiting triage.")
         message = text_field(body(), "message", 5, "Your question")
@@ -367,6 +378,7 @@ def create_app():
         issue, _ = load_issue_for(issue_id)
         if issue:
             require_project_role(issue, "triage_lead")
+            require_active(issue)
         if not issue or issue["status"] != "new":
             raise ValidationError("The agent can only re-plan issues awaiting triage.")
         service.create_plan(issue_id)
@@ -392,6 +404,7 @@ def create_app():
             return jsonify(error="Issue not found."), 404
         if issue["status"] != "needs_info":
             raise ValidationError("No information has been requested for this issue.")
+        require_active(issue)
         details = text_field(body(), "details", 5, "Additional information")
         service.retriage_with_info(issue, details)
         db.audit(g.user["id"], "info_added", issue_id)
@@ -405,6 +418,7 @@ def create_app():
             return jsonify(error="Issue not found."), 404
         if issue["status"] != "assigned":
             raise ValidationError("Only assigned issues can be resolved.")
+        require_active(issue)
         resolution = text_field(body(), "resolution", 5, "Resolution")
         db.save_resolution(issue_id, resolution, g.user["id"])
         db.audit(g.user["id"], "issue_resolved", issue_id)
@@ -418,7 +432,7 @@ def create_app():
     def developers():
         project = scoped_project("triage_lead")
         return jsonify([{"id": d["id"], "name": d["display_name"], "modules": d["modules"],
-                         "open_count": d["open_count"]} for d in db.developer_workload(project["id"])])
+                         "open_count": d["open_total"]} for d in db.developer_workload(project["id"])])
 
     # ---------- insights ----------
 
@@ -496,7 +510,8 @@ def create_app():
     @app.get("/api/admin/users")
     @require_roles("admin")
     def admin_users():
-        return jsonify(db.list_users())
+        roles = db.all_memberships()
+        return jsonify([u | {"projects": roles.get(u["id"], [])} for u in db.list_users()])
 
     def clean_modules(data, role):
         modules = data.get("modules") or []
@@ -671,6 +686,10 @@ def create_app():
     def admin_update_project(slug):
         project = project_or_404(slug)
         fields = clean_project(body(), project)
+        if (fields.get("tracker", project["tracker"]), fields.get("repo", project["repo"])) != \
+                (project["tracker"], project["repo"]) and db.has_imported_issues(project["id"]):
+            raise ValidationError("This project already has imported issues; changing its tracker or "
+                                  "repository would mix two repositories. Create a new project instead.")
         tracker_keys = {"tracker", "repo", "base_url", "token_env", "email_env", "secret_env"}
         if any(k in body() for k in tracker_keys):
             fields["managed_by_env"] = 0  # edited by an administrator: stop following .env
@@ -692,6 +711,32 @@ def create_app():
                                       and (m.get("github_login") or "").lower() not in logins]
         db.audit(g.user["id"], "project_tested", detail={"project": slug, "ok": result["ok"]})
         return jsonify(result)
+
+    @app.get("/api/admin/overview")
+    @require_roles("admin")
+    def admin_overview():
+        """Per project: who holds which role, and each person's open and resolved assignments.
+        Counts only; no issue content."""
+        slug = request.args.get("project")
+        projects = [project_or_404(slug)] if slug else db.list_projects()
+        out = []
+        for project in projects:
+            members = db.project_members(project["id"])
+            counts = db.assignment_counts(project["id"])
+            by_status = db.project_counts(project["id"])["by_status"]
+            people = [{"user_id": m["id"], "display_name": m["display_name"], "username": m["username"],
+                       "role": m["project_role"], "modules": m["project_modules"],
+                       "github_login": m.get("github_login"), "active": m["active"],
+                       **counts.get(m["id"], {"open": 0, "resolved": 0})} for m in members]
+            # People who still hold issues here but are no longer members (should be none)
+            orphans = [uid for uid, c in counts.items() if c["open"] and uid not in {m["id"] for m in members}]
+            out.append({"slug": project["slug"], "name": project["name"], "tracker": project["tracker"],
+                        "repo": project["repo"], "active": project["active"],
+                        "roles": {r: sum(p["role"] == r for p in people) for r in PROJECT_ROLES},
+                        "members": people, "unassigned_open": by_status.get("new", 0)
+                        + by_status.get("needs_info", 0), "assigned_open": by_status.get("assigned", 0),
+                        "resolved": by_status.get("resolved", 0), "orphan_assignees": len(orphans)})
+        return jsonify(out)
 
     @app.get("/api/admin/projects/<slug>/members")
     @require_roles("admin")
@@ -767,6 +812,8 @@ def create_app():
         if open_ids:
             db.release_assignments(project["id"], user_id)
         db.remove_membership(project["id"], user_id)
+        for issue_id in open_ids:  # the old plan named the removed developer
+            service.create_plan(issue_id)
         db.audit(g.user["id"], "member_removed", detail={
             "project": slug, "user_id": user_id, "role": current["role"], "released": len(open_ids)})
         return admin_project_members(slug)
@@ -841,12 +888,13 @@ def create_app():
         return jsonify(ok=True)
 
     def webhook_pipeline(slug):
-        """/api/webhooks/<project slug>. The old /api/webhooks/github (or /jira) still works while
-        exactly one active project uses that tracker."""
+        """/api/webhooks/<project slug>. The old /api/webhooks/github (or /jira) keeps working for
+        the oldest project using that tracker, so adding a second project never breaks it; new
+        projects use their own URL."""
         p = pipelines.by_slug(slug)
         if p is None and slug in ("github", "jira"):
-            matches = [x for x in db.list_projects(active_only=True) if x["tracker"] == slug]
-            p = pipelines.get(matches[0]["id"]) if len(matches) == 1 else None
+            matches = [x for x in db.list_projects() if x["tracker"] == slug]  # oldest first
+            p = pipelines.get(matches[0]["id"]) if matches else None
         if p is None or not p.project["active"] or p.name not in ("github", "jira"):
             return None
         return p
@@ -901,4 +949,4 @@ if __name__ == "__main__":
     interval = int(os.getenv("SYNC_INTERVAL_SECONDS", "0"))
     if interval > 0:
         start_background_sync(application, interval)
-    application.run(debug=False, port=int(os.getenv("PORT", "5000")))
+    application.run(debug=False, port=int(os.getenv("PORT", "5003")))

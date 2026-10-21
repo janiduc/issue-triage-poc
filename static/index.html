@@ -175,7 +175,7 @@ const VIEWS = {
   reporter:    [["report", "Report an issue"], ["mine", "My issues"]],
   triage_lead: [["queue", "Triage queue"], ["insights", "Insights"], ["tracker", "Tracker"], ["report", "Report an issue"]],
   developer:   [["assigned", "My assignments"], ["report", "Report an issue"], ["mine", "Issues I reported"]],
-  admin:       [["projects", "Projects"], ["users", "Users and roles"], ["settings", "AI settings"], ["tracker", "Tracker"], ["audit", "Activity log"], ["insights", "Insights"]],
+  admin:       [["projects", "Projects"], ["team", "Team overview"], ["users", "Users and roles"], ["settings", "AI settings"], ["tracker", "Tracker"], ["audit", "Activity log"], ["insights", "Insights"]],
 };
 
 const state = { user: null, options: null, view: null, status: "new", selected: null, project: null };
@@ -201,10 +201,20 @@ const post = (path, data, method = "POST") => api(path, {method, body: JSON.stri
 function showLogin() {
   state.user = null;
   $("#shell").hidden = true; $("#login").hidden = false;
-  $("#demo-list").innerHTML = DEMO.map(([u, label]) =>
-    `<li><button type="button" data-u="${u}">${u}</button> · ${label}</li>`).join("");
-  $$("#demo-list button").forEach((b) => b.onclick = () => { $("#l-user").value = b.dataset.u; $("#l-pass").focus(); });
-  api("/api/public-config").then((c) => { $("#demo-users").hidden = !c.demo_accounts; }).catch(() => {});
+  const ROLE_NAMES = {triage_lead: "Triage lead", developer: "Developer", reporter: "Reporter"};
+  const fill = (accounts) => {
+    $("#demo-list").innerHTML = accounts.map((a) => {
+      const roles = a.admin ? "Administrator (all projects)"
+        : a.projects.map((p) => `${ROLE_NAMES[p.role]} · ${esc(p.name)}`).join("; ") || "No project yet";
+      return `<li><button type="button" data-u="${esc(a.username)}">${esc(a.username)}</button> · ${roles}</li>`;
+    }).join("");
+    $$("#demo-list button").forEach((b) => b.onclick = () => { $("#l-user").value = b.dataset.u; $("#l-pass").focus(); });
+  };
+  api("/api/public-config").then((c) => {
+    $("#demo-users").hidden = !c.demo_accounts;
+    fill(c.accounts && c.accounts.length ? c.accounts
+      : DEMO.map(([u, label]) => ({username: u, admin: u === "admin", projects: [{name: label, role: ""}]})));
+  }).catch(() => {});
   $("#l-user").focus();
 }
 
@@ -251,7 +261,7 @@ function go(view) {
     ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"));
   ({report: viewReport, mine: () => viewList("mine"), assigned: () => viewList("assigned"),
     queue: () => viewList("all"), insights: viewInsights, users: viewUsers,
-    settings: viewSettings, audit: viewAudit, tracker: viewTracker, projects: viewProjects})[view]();
+    settings: viewSettings, audit: viewAudit, tracker: viewTracker, projects: viewProjects, team: viewTeam})[view]();
 }
 
 /* ---------- report an issue (reporter, developer, lead) ---------- */
@@ -341,7 +351,7 @@ function listItem(i, scope) {
     ${i.duplicate_of ? ` · possible duplicate of #${i.duplicate_of}` : ""}
     ${i.suggestion.source === "fallback" ? " · backup classifier" : ""}`;
   return `<li><button class="item" data-id="${i.id}" aria-pressed="${i.id === state.selected}">
-    <div class="tag ${scope === "mine" ? (i.priority || "") : p}"><div class="title">#${i.id} ${esc(i.title)}${i.external_key ? `<span class="ext">${esc(i.external_key)}</span>` : ""}${i.sync_status === "failed" ? `<span class="ext sync-failed">sync failed</span>` : ""}</div>
+    <div class="tag ${scope === "mine" ? (i.priority || "") : p}"><div class="title">#${i.id} ${esc(i.title)}${scope !== "all" && (state.user.projects || []).length > 1 && i.project_name ? `<span class="ext">${esc(i.project_name)}</span>` : ""}${i.external_key ? `<span class="ext">${esc(i.external_key)}</span>` : ""}${i.sync_status === "failed" ? `<span class="ext sync-failed">sync failed</span>` : ""}</div>
     <div class="meta">${meta}</div></div></button></li>`;
 }
 
@@ -601,8 +611,8 @@ async function viewInsights() {
 async function viewUsers() {
   const o = state.options;
   $("#view").innerHTML = `<section><h2>Users and roles</h2>
-      <p class="hint">Role and modules here apply to the first project; use Projects to give people roles in other projects. Map tracker accounts so assignments also appear in GitHub or Jira.</p>
-      <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Modules owned</th><th>Tracker accounts</th><th>Status</th><th></th></tr></thead>
+      <p class="hint">"Roles by project" shows what each person can do in every repository. The role and modules you edit here apply to the first project only; use Projects to change roles in the others. Map tracker accounts so assignments also appear in GitHub or Jira.</p>
+      <div class="table-wrap"><table><thead><tr><th>User</th><th>Roles by project</th><th>Role in first project</th><th>Modules owned (first project)</th><th>Tracker accounts</th><th>Status</th><th></th></tr></thead>
       <tbody id="users"></tbody></table></div><div id="users-msg" role="alert"></div></section>
     <section class="narrow"><h2>Add a user</h2>
       <form id="new-user">
@@ -618,6 +628,9 @@ async function viewUsers() {
     const users = await api("/api/admin/users");
     $("#users").innerHTML = users.map((u) => `<tr data-id="${u.id}">
       <td><b>${esc(u.display_name)}</b><div class="hint">${esc(u.username)}</div></td>
+      <td>${u.role === "admin" ? "<b>Administrator</b> (all projects)" : (u.projects.length
+        ? u.projects.map((p) => `<div><b>${esc(PROJECT_ROLE_LABELS[p.role])}</b> · ${esc(p.name)}${p.active ? "" : " (archived)"}${p.role === "developer" && p.modules.length ? `<div class="hint">${p.modules.map(nice).map(esc).join(", ")}</div>` : ""}</div>`).join("")
+        : '<span class="hint">No project</span>')}</td>
       <td>${selectHtml(`role-${u.id}`, o.roles, u.role, o.role_labels)}</td>
       <td>${u.role === "developer" ? o.modules.map((m) => `<label class="inline"><input type="checkbox" value="${m}" ${u.modules.includes(m) ? "checked" : ""}>${nice(m)}</label>`).join("") : `<span class="hint">–</span>`}</td>
       <td>${u.role === "developer" ? `<label class="hint" style="margin:0" for="gh-${u.id}">GitHub login</label><input class="inline-input gh" id="gh-${u.id}" value="${esc(u.github_login || "")}">
@@ -771,6 +784,40 @@ async function viewProjects() {
             });
   };
   loadList().catch((e) => msg($("#pn-msg"), "error", e.message));
+}
+
+/* ---------- team overview (admin): roles and assignments per project, counts only ---------- */
+
+async function viewTeam() {
+  $("#view").innerHTML = `<section><h2>Team overview</h2>
+    <p class="hint">Who holds which role in ${state.project ? "the selected project" : "each project"}, and how many issues each person has open or has resolved there. Counts only; issue content stays hidden.</p>
+    <div id="team"></div></section>`;
+  try {
+    const projects = await api(withProject("/api/admin/overview"));
+    const order = {triage_lead: 0, developer: 1, reporter: 2};
+    $("#team").innerHTML = projects.map((p) => {
+      const members = [...p.members].sort((a, b) => order[a.role] - order[b.role] || b.open - a.open);
+      const rows = members.map((m) => `<tr>
+        <td><b>${esc(m.display_name)}</b><div class="hint">${esc(m.username)}${m.active ? "" : " · deactivated"}</div></td>
+        <td>${PROJECT_ROLE_LABELS[m.role]}</td>
+        <td>${m.role === "developer" ? (m.modules.length ? m.modules.map(nice).map(esc).join(", ") : '<span class="hint">none</span>') : '<span class="hint">–</span>'}</td>
+        <td>${m.github_login ? esc(m.github_login) : '<span class="hint">not mapped</span>'}</td>
+        <td class="score">${m.role === "developer" || m.open ? m.open : "–"}</td>
+        <td class="score">${m.role === "developer" || m.resolved ? m.resolved : "–"}</td></tr>`).join("");
+      return `<h3>${esc(p.name)} ${p.active ? "" : '<span class="ext">archived</span>'}</h3>
+        <p class="hint">${esc(TRACKER_NAMES[p.tracker])}${p.repo ? " · " + esc(p.repo) : ""}</p>
+        <div class="stats">
+          <div class="stat"><div class="n">${p.roles.triage_lead}</div><div class="hint">triage leads</div></div>
+          <div class="stat"><div class="n">${p.roles.developer}</div><div class="hint">developers</div></div>
+          <div class="stat"><div class="n">${p.roles.reporter}</div><div class="hint">reporters</div></div>
+          <div class="stat"><div class="n">${p.assigned_open}</div><div class="hint">issues with developers</div></div>
+          <div class="stat"><div class="n">${p.unassigned_open}</div><div class="hint">not yet assigned</div></div>
+          <div class="stat"><div class="n">${p.resolved}</div><div class="hint">resolved</div></div></div>
+        ${p.roles.triage_lead ? "" : '<p class="error">No triage lead: nobody can approve this project\'s issues.</p>'}
+        <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Member</th><th>Role</th><th>Modules owned</th><th>GitHub login</th><th>Open assigned</th><th>Resolved</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="6" class="empty">No members yet.</td></tr>'}</tbody></table></div>`;
+    }).join("");
+  } catch (err) { $("#team").innerHTML = `<p class="error">${esc(err.message)}</p>`; }
 }
 
 async function viewSettings() {

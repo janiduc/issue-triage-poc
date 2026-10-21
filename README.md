@@ -104,7 +104,10 @@ can opt in to the generic seeded fixes.
 The first project is created from `.env` (`TRACKER`, `GITHUB_REPO`, ...) and follows it until an
 administrator edits its connection. For more repositories, add one token per project to `.env`
 under any name (for example `GITHUB_TOKEN_BOOKING=...`) and enter that name on the project.
-Each project's webhook URL is `https://<your-server>/api/webhooks/<short name>`.
+Each project's webhook URL is `https://<your-server>/api/webhooks/<short name>`. The older
+`/api/webhooks/github` keeps working for the oldest GitHub project. Once a second project exists,
+the first project stops following `.env`, and a project that has imported issues cannot be pointed
+at another repository. Archived projects are read-only: no imports, no tracker updates.
 
 ## User roles
 
@@ -142,6 +145,22 @@ python app.py                      # reads .env; variables already set in the sh
 Open http://127.0.0.1:5000. Demo accounts all use the password `demo1234`:
 `client.acme` and `tester` (reporters), `lead` (triage lead), `dev.payments`, `dev.platform`,
 `dev.frontend` (developers), `admin`. They exist only in development (see Deployment).
+
+For a two-repository setup, `python scripts/seed_project_accounts.py` adds the Harbour Bookings
+project and separate accounts for each repository, each with a role in one project only (same demo
+password). The sign-in page lists every demo account with its role in each project.
+
+| Account | Role | Project |
+|---|---|---|
+| `bluefin.lead` | Triage lead | Bluefin Shop |
+| `bluefin.dev.payments` | Developer (payments, reporting) | Bluefin Shop |
+| `bluefin.dev.platform` | Developer (authentication, api, performance) | Bluefin Shop |
+| `bluefin.dev.frontend` | Developer (user interface, other) | Bluefin Shop |
+| `bluefin.reporter` | Reporter | Bluefin Shop |
+| `harbour.lead` | Triage lead | Harbour Bookings |
+| `harbour.dev.bookings` | Developer (bookings, other) | Harbour Bookings |
+| `harbour.dev.payments` | Developer (payments, notifications) | Harbour Bookings |
+| `harbour.reporter` | Reporter | Harbour Bookings |
 
 Without a model everything still works using the backup classifier and the rules planner.
 

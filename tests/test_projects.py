@@ -2,6 +2,7 @@
 import os
 import sqlite3
 
+from app import create_app
 from tests.test_triage import Base, llm_reply
 from triage import db
 
@@ -451,3 +452,174 @@ class ProjectLogTests(Base):
         self.assertIn("issue_submitted", first)
         self.assertNotIn("project_created", first)
         self.assertEqual(admin.get("/api/admin/audit?project=nope").status_code, 404)
+
+
+class TeamOverviewTests(Base):
+    # TO1: per-project roles and assignment counts, without issue content, for the admin only
+    def test_to1_team_overview(self):
+        admin = self.as_user("admin")
+        admin.post("/api/admin/projects", json={"slug": "booking", "name": "Booking API", "tracker": "none"})
+        lead = self.as_user("lead")
+        issue = self.submit(lead, "Refund missing", "A refund did not appear in the customer account.").get_json()
+        dev = db.get_user_by_username("dev.payments")["id"]
+        lead.post(f"/api/issues/{issue['id']}/triage", json={"action": "accept", "assignee_id": dev})
+        data = admin.get("/api/admin/overview").get_json()
+        first, booking = data
+        self.assertEqual(first["roles"], {"triage_lead": 1, "developer": 3, "reporter": 2})
+        payments = next(m for m in first["members"] if m["username"] == "dev.payments")
+        self.assertEqual((payments["open"], payments["resolved"]), (1, 0))
+        self.assertEqual(first["assigned_open"], 1)
+        self.assertEqual(booking["roles"], {"triage_lead": 0, "developer": 0, "reporter": 0})
+        self.assertNotIn("Refund missing", str(data))                   # counts only
+        self.assertEqual(len(admin.get("/api/admin/overview?project=booking").get_json()), 1)
+        self.assertEqual(lead.get("/api/admin/overview").status_code, 403)
+
+    # TO2: removing someone from the first project survives a restart (the migration runs again)
+    def test_to2_removal_survives_restart(self):
+        admin = self.as_user("admin")
+        tester = db.get_user_by_username("tester")["id"]
+        admin.delete(f"/api/admin/projects/simulated/members/{tester}")
+        create_app()                                                  # start-up runs the migration
+        self.assertNotIn(db.default_project_id(), db.memberships(tester))
+
+
+class CrossProjectFixTests(Base):
+    """Regression tests for docs/multi_project_review.md (problems between two projects)."""
+
+    def setUp(self):
+        super().setUp()
+        self.admin = self.as_user("admin")
+        self.lead = self.as_user("lead")
+        os.environ["SIM_TRACKER_DIR"] = self.tmp.name
+        self.admin.post("/api/admin/projects", json={"slug": "second", "name": "Second", "tracker": "simulated",
+                                                     "modules": ["bookings", "payments", "other"]})
+        self.second = db.get_project_by_slug("second")["id"]
+        self.first = db.default_project_id()
+        db.set_membership(self.second, self.uid("lead"), "triage_lead")
+        db.set_membership(self.second, self.uid("dev.payments"), "developer", ["payments"])
+
+    def tearDown(self):
+        os.environ.pop("SIM_TRACKER_DIR", None)
+        for k in ("GH_A", "GH_SA", "GH_B", "GH_SB"):
+            os.environ.pop(k, None)
+        os.environ["TRACKER"] = "simulated"
+        os.environ.pop("GITHUB_REPO", None)
+        super().tearDown()
+
+    def uid(self, username):
+        return db.get_user_by_username(username)["id"]
+
+    def sync(self, slug):
+        from unittest import mock
+        from triage import llm
+        with mock.patch.object(llm, "call_model", return_value=llm_reply(module="payments")):
+            return self.lead.post(f"/api/integration/sync?project={slug}")
+
+    # RV1: with a second project, the first stops following .env and keeps its repository
+    def test_rv1_first_project_stops_following_env(self):
+        os.environ.update(TRACKER="github", GITHUB_REPO="acme/other")
+        create_app()
+        self.assertEqual(db.get_project(self.first)["tracker"], "simulated")
+        self.assertEqual(db.get_project(self.first)["managed_by_env"], 0)
+
+    # RV1b: a project with imported issues cannot be pointed at another repository
+    def test_rv1b_no_repointing_after_import(self):
+        self.sync("second")
+        res = self.admin.patch("/api/admin/projects/second", json={"tracker": "github", "repo": "acme/x"})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("mix two repositories", res.get_json()["error"])
+
+    # RV2: an archived project neither imports nor writes back, and its issues are read-only
+    def test_rv2_archived_project_is_read_only(self):
+        self.sync("second")
+        issue_id = db.find_external("simulated", "SIM-2", project_id=self.second)
+        self.admin.patch("/api/admin/projects/second", json={"active": False})
+        self.assertEqual(self.sync("second").status_code, 400)
+        res = self.lead.post(f"/api/issues/{issue_id}/triage",
+                             json={"action": "accept", "assignee_id": self.uid("dev.payments")})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("archived", res.get_json()["error"])
+        pipeline = self.app.config["pipelines"].get(self.second)
+        self.assertIsNone(pipeline.queue(issue_id, "comment", text="hello"))
+        self.assertEqual(self.lead.get("/api/issues?scope=all&project=second").status_code, 200)  # still readable
+
+    # RV3: reporting without a project never lands in an archived one
+    def test_rv3_reporting_skips_archived_projects(self):
+        acme = self.as_user("client.acme")
+        db.remove_membership(self.first, self.uid("client.acme"))
+        db.set_membership(self.second, self.uid("client.acme"), "reporter")
+        self.admin.patch("/api/admin/projects/second", json={"active": False})
+        res = self.submit(acme, "Checkout error", "Checkout fails today for everyone.")
+        self.assertEqual(res.status_code, 400)
+
+    # RV4: editing a user on the Users screen does not re-add them to the first project
+    def test_rv4_users_screen_edit_keeps_removal(self):
+        tester = self.uid("tester")
+        self.admin.delete(f"/api/admin/projects/simulated/members/{tester}")
+        self.admin.patch(f"/api/admin/users/{tester}", json={"display_name": "Renamed tester", "role": "reporter"})
+        self.assertNotIn(self.first, db.memberships(tester))
+        # becoming an administrator ends every membership
+        dev = self.uid("dev.payments")
+        self.admin.patch(f"/api/admin/users/{dev}", json={"role": "admin"})
+        self.assertEqual(db.memberships(dev), {})
+
+    # RV5: the old webhook URL keeps working after a second GitHub project is added
+    def test_rv5_old_webhook_url_with_two_github_projects(self):
+        import hashlib, hmac, json
+        os.environ.update(GH_A="a", GH_SA="sa", GH_B="b", GH_SB="sb")
+        r = self.admin.post("/api/admin/projects", json={"slug": "repo-a", "name": "Repo A", "tracker": "github",
+                                                     "repo": "acme/a", "token_env": "GH_A", "secret_env": "GH_SA"})
+        self.assertEqual(r.status_code, 201, r.get_json())
+        self.admin.post("/api/admin/projects", json={"slug": "repo-b", "name": "Repo B", "tracker": "github",
+                                                     "repo": "acme/b", "token_env": "GH_B", "secret_env": "GH_SB"})
+        payload = json.dumps({"action": "edited", "issue": {"number": 5}}).encode()
+        sig = "sha256=" + hmac.new(b"sa", payload, hashlib.sha256).hexdigest()
+        res = self.app.test_client().post("/api/webhooks/github", data=payload,
+                                          headers={"X-GitHub-Event": "issues", "X-Hub-Signature-256": sig})
+        self.assertEqual(res.status_code, 200)                         # routed to the oldest: repo-a
+
+    # RV6: open work in another project counts against a developer
+    def test_rv6_workload_counts_all_projects(self):
+        from triage import assignment
+        for n in range(3):
+            i = db.insert_issue(f"t{n}", "x", None, {"ai_type": "bug", "ai_module": "payments",
+                                                     "ai_priority": "low", "ai_confidence": 0.5},
+                                {"source": "desk", "project_id": self.first})
+            db.save_triage_decision(i, "accept", "bug", "payments", "low", self.uid("dev.payments"), None)
+        top = assignment.rank_developers("payments", project_id=self.second)[0]
+        self.assertEqual(top["open_count"], 3)
+        self.assertEqual(top["score"], 3.0 - 3)
+        self.assertTrue(any("3 in other projects" in r for r in top["reasons"]))
+
+    # RV7: issues sent back to the queue get a fresh plan without the removed developer
+    def test_rv7_released_issues_are_replanned(self):
+        self.sync("second")
+        issue_id = db.find_external("simulated", "SIM-1", project_id=self.second)
+        self.lead.post(f"/api/issues/{issue_id}/triage",
+                       json={"action": "accept", "assignee_id": self.uid("dev.payments")})
+        self.admin.delete(f"/api/admin/projects/second/members/{self.uid('dev.payments')}?release=true")
+        plan = db.latest_plan(issue_id)
+        self.assertEqual((db.get_issue(issue_id)["status"], plan["status"]), ("new", "proposed"))
+        self.assertNotEqual(plan["plan"]["assignee_id"], self.uid("dev.payments"))
+
+    # RV9: lists across projects carry the project name
+    def test_rv9_lists_name_the_project(self):
+        self.submit(self.as_user("client.acme"), "Checkout error", "Checkout fails today for everyone.")
+        mine = self.as_user("client.acme").get("/api/issues?scope=mine").get_json()
+        self.assertEqual(mine[0]["project_name"], "Simulated tracker")
+
+
+class RoleVisibilityTests(Base):
+    # RS1: Users and roles and the sign-in list show each person's role in every project
+    def test_rs1_roles_by_project(self):
+        admin = self.as_user("admin")
+        admin.post("/api/admin/projects", json={"slug": "booking", "name": "Booking API", "tracker": "none"})
+        dev = db.get_user_by_username("dev.platform")["id"]
+        db.set_membership(db.get_project_by_slug("booking")["id"], dev, "triage_lead")
+        users = {u["username"]: u for u in admin.get("/api/admin/users").get_json()}
+        self.assertEqual([(p["name"], p["role"]) for p in users["dev.platform"]["projects"]],
+                         [("Simulated tracker", "developer"), ("Booking API", "triage_lead")])
+        self.assertEqual(users["admin"]["projects"], [])
+        accounts = {a["username"]: a for a in self.app.test_client().get("/api/public-config").get_json()["accounts"]}
+        self.assertEqual(len(accounts["dev.platform"]["projects"]), 2)
+        self.assertTrue(accounts["admin"]["admin"])
