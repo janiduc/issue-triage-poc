@@ -194,8 +194,10 @@ def create_app():
     @app.get("/api/public-config")
     def public_config():
         """What the sign-in page may show before anyone signs in."""
-        demo = db.get_user_by_username("lead") is not None and config.seed_demo_users()
-        return jsonify(demo_accounts=demo)
+        if config.is_production() or not config.seed_demo_users():
+            return jsonify(demo_accounts=False, accounts=[])
+        accounts = db.demo_accounts(db.DEMO_PASSWORD)
+        return jsonify(demo_accounts=bool(accounts), accounts=accounts)
 
     @app.post("/api/login")
     def login():
@@ -508,7 +510,8 @@ def create_app():
     @app.get("/api/admin/users")
     @require_roles("admin")
     def admin_users():
-        return jsonify(db.list_users())
+        roles = db.all_memberships()
+        return jsonify([u | {"projects": roles.get(u["id"], [])} for u in db.list_users()])
 
     def clean_modules(data, role):
         modules = data.get("modules") or []

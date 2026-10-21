@@ -390,6 +390,32 @@ def project_members(project_id):
     return out
 
 
+def all_memberships():
+    """{user_id: [{"slug", "name", "role", "modules"}]} across every project."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT m.user_id, m.role, m.modules, p.slug, p.name, p.active FROM project_members m "
+            "JOIN projects p ON p.id = m.project_id ORDER BY p.id").fetchall()
+    out = {}
+    for r in rows:
+        out.setdefault(r["user_id"], []).append({"slug": r["slug"], "name": r["name"], "role": r["role"],
+                                                 "modules": json.loads(r["modules"] or "[]"),
+                                                 "active": bool(r["active"])})
+    return out
+
+
+def demo_accounts(password):
+    """Active users whose password is the demo password, with their project roles. Development only."""
+    from werkzeug.security import check_password_hash
+    with connect() as conn:
+        rows = conn.execute("SELECT id, username, display_name, role, password_hash FROM users "
+                            "WHERE active = 1 ORDER BY id").fetchall()
+    roles = all_memberships()
+    return [{"username": r["username"], "display_name": r["display_name"], "admin": r["role"] == "admin",
+             "projects": [{"name": m["name"], "role": m["role"]} for m in roles.get(r["id"], []) if m["active"]]}
+            for r in rows if check_password_hash(r["password_hash"], password)]
+
+
 def project_counts(project_id):
     """Numbers only (the administrator never sees issue content)."""
     with connect() as conn:

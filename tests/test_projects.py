@@ -607,3 +607,19 @@ class CrossProjectFixTests(Base):
         self.submit(self.as_user("client.acme"), "Checkout error", "Checkout fails today for everyone.")
         mine = self.as_user("client.acme").get("/api/issues?scope=mine").get_json()
         self.assertEqual(mine[0]["project_name"], "Simulated tracker")
+
+
+class RoleVisibilityTests(Base):
+    # RS1: Users and roles and the sign-in list show each person's role in every project
+    def test_rs1_roles_by_project(self):
+        admin = self.as_user("admin")
+        admin.post("/api/admin/projects", json={"slug": "booking", "name": "Booking API", "tracker": "none"})
+        dev = db.get_user_by_username("dev.platform")["id"]
+        db.set_membership(db.get_project_by_slug("booking")["id"], dev, "triage_lead")
+        users = {u["username"]: u for u in admin.get("/api/admin/users").get_json()}
+        self.assertEqual([(p["name"], p["role"]) for p in users["dev.platform"]["projects"]],
+                         [("Simulated tracker", "developer"), ("Booking API", "triage_lead")])
+        self.assertEqual(users["admin"]["projects"], [])
+        accounts = {a["username"]: a for a in self.app.test_client().get("/api/public-config").get_json()["accounts"]}
+        self.assertEqual(len(accounts["dev.platform"]["projects"]), 2)
+        self.assertTrue(accounts["admin"]["admin"])
