@@ -246,14 +246,17 @@ vague, or prompt injection, and results are reported per case.
 - **Simulated:** the default tracker (`data/simulated_tracker_seed.json`) and both datasets in
   `data/` describe a fictional e-commerce platform. The GitHub connector was also validated
   end to end against a real repository (import, write-back, reporter reply, closing, outage and
-  retry; see [docs/github_validation.md](docs/github_validation.md)). The Jira connector and
-  the webhooks are tested against mocked API responses only.
+  retry; see [docs/github_validation.md](docs/github_validation.md)). The GitHub webhook was
+  also checked live through a temporary tunnel. The Jira connector is tested against mocked API
+  responses only.
 
 ## Known limitations
 
 - The agent's confidence is self-reported and not calibrated.
 - Ranking weights are hand-set; they should be tuned with the team.
 - A reporter's reply is detected on the next sync or webhook; there are no email notifications.
+- Webhooks are processed before the response is sent; with a slow model GitHub may record the
+  delivery as timed out (it waits 10 seconds) even though the issue was imported.
 - Single-process design (SQLite, in-memory login lockout of 15 minutes after 5 failures); a
   production version would use a database server and a job queue for sync.
 - Regex redaction covers emails, phone and card numbers, and common key and token formats

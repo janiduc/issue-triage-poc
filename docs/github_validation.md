@@ -20,7 +20,14 @@ collaborators.
 | Resolution closes the issue | #1 | Closed on GitHub as completed, with the fix as the last comment |
 | Tracker outage and retry | #5 | Approval with a revoked token: the decision was kept, the write was queued and shown as "not delivered" (HTTP 401); a retry with the working token delivered it |
 
-Not yet tested: the signed webhook (it needs a public URL, for example through a tunnel) and Jira.
+| Signed webhook, instant import | #13 | On 21 October, through a temporary Cloudflare tunnel: an unsigned request to the public URL was rejected (HTTP 401); a new issue opened on GitHub reached the desk in 27 seconds with no import run |
+
+Not tested: Jira.
+
+The webhook handler classifies and plans the issue before it answers, which took most of those
+27 seconds with the local model. GitHub stops waiting for a webhook response after 10 seconds, so
+it records such a delivery as timed out even though the desk processed it. A production version
+would answer at once and process the issue in a background job.
 
 ## Classification and plans against the answer key
 
