@@ -328,13 +328,28 @@ def update_project(project_id, **fields):
             conn.execute(f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", params + [project_id])
 
 
+def has_imported_issues(project_id):
+    with connect() as conn:
+        return conn.execute("SELECT 1 FROM issues WHERE project_id = ? AND external_id IS NOT NULL LIMIT 1",
+                            (project_id,)).fetchone() is not None
+
+
 def sync_env_project():
-    """The first project's tracker settings follow .env until an administrator edits it."""
+    """The first project's tracker settings follow .env until an administrator edits it, a second
+    project exists, or it has imported issues from a DIFFERENT repository than .env now names.
+    Re-pointing a project with imported issues would make the new repository's issue numbers
+    collide with the old ones, so then the project keeps its repository and stops following .env."""
     with connect() as conn:
         row = conn.execute("SELECT id FROM projects WHERE managed_by_env = 1 ORDER BY id LIMIT 1").fetchone()
+        others = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] > 1
     if not row:
         return
+    project = get_project(row["id"])
     p = config.default_project_settings()
+    moved = (p["tracker"], p.get("repo")) != (project["tracker"], project.get("repo"))
+    if others or (moved and has_imported_issues(row["id"])):
+        update_project(row["id"], managed_by_env=0)
+        return
     update_project(row["id"], tracker=p["tracker"], repo=p.get("repo"), base_url=p.get("base_url"),
                    token_env=p.get("token_env"), email_env=p.get("email_env"),
                    secret_env=p.get("secret_env"))
@@ -413,15 +428,21 @@ def release_assignments(project_id, user_id):
                      "AND assignee_id = ? AND status = 'assigned'", (project_id, user_id))
 
 
-def _sync_default_membership(user_id):
-    """Phase 1 compatibility: a user's global role and modules mirror into the first project."""
+def _sync_default_membership(user_id, created=False):
+    """The Users screen's role and modules are the user's role in the first project.
+
+    A new user joins the first project. Later, only an existing first-project membership is
+    updated, so someone removed from it is never silently added back. Becoming an administrator
+    ends every membership (administrators are global)."""
     user = get_user(user_id)
     project_id = default_project_id()
     if not user or project_id is None:
         return
     if user["role"] == "admin":
-        remove_membership(project_id, user_id)
-    else:
+        with connect() as conn:
+            conn.execute("DELETE FROM project_members WHERE user_id = ?", (user_id,))
+        return
+    if created or project_id in memberships(user_id):
         set_membership(project_id, user_id, user["role"], json.loads(user["modules"] or "[]"))
 
 
@@ -464,13 +485,14 @@ def create_user(username, display_name, role, password, modules):
             (username, display_name, role, generate_password_hash(password),
              json.dumps(modules), now()))
         user_id = cur.lastrowid
-    _sync_default_membership(user_id)
+    _sync_default_membership(user_id, created=True)
     return user_id
 
 
 def update_user(user_id, **fields):
     allowed = {"display_name", "role", "active", "modules", "password", "github_login",
                "jira_account_id"}
+    before = get_user(user_id)
     sets, params = [], []
     for key, value in fields.items():
         if key not in allowed or value is None:
@@ -487,7 +509,9 @@ def update_user(user_id, **fields):
     if sets:
         with connect() as conn:
             conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = ?", params + [user_id])
-        _sync_default_membership(user_id)
+        after = get_user(user_id)
+        if before and (before["role"], before["modules"]) != (after["role"], after["modules"]):
+            _sync_default_membership(user_id, created=before["role"] == "admin")
 
 
 def developer_workload(project_id=None):
@@ -499,7 +523,9 @@ def developer_workload(project_id=None):
         rows = conn.execute(
             """SELECT u.*, m.modules AS project_modules,
                       (SELECT COUNT(*) FROM issues i WHERE i.assignee_id = u.id
-                       AND i.status = 'assigned' AND i.project_id = m.project_id) AS open_count
+                       AND i.status = 'assigned' AND i.project_id = m.project_id) AS open_count,
+                      (SELECT COUNT(*) FROM issues i WHERE i.assignee_id = u.id
+                       AND i.status = 'assigned') AS open_total
                FROM project_members m JOIN users u ON u.id = m.user_id
                WHERE m.project_id = ? AND m.role = 'developer' AND u.active = 1""",
             (project_id,)).fetchall()
@@ -507,7 +533,8 @@ def developer_workload(project_id=None):
     for r in rows:
         d = user_to_dict(r)
         d["modules"] = json.loads(r["project_modules"] or "[]")
-        d["open_count"] = r["open_count"]
+        d["open_count"] = r["open_count"]          # in this project
+        d["open_total"] = r["open_total"]          # in every project: the real workload
         out.append(d)
     return out
 

@@ -4,6 +4,10 @@ Review of branch `multi-project` on 21 October 2026, after the two-repository de
 marked **reproduced** were confirmed with a throwaway database and mocked trackers; the others come
 from reading the code.
 
+**Status, 21 October 2026:** problems 1 to 7 and 9 are fixed on the same branch, each with a
+regression test (`CrossProjectFixTests` in `tests/test_projects.py`, RV1 to RV9). Problems 8 and
+10 remain open (Low).
+
 ## Problems
 
 | # | Problem | Effect | Evidence | Severity |

@@ -341,7 +341,7 @@ function listItem(i, scope) {
     ${i.duplicate_of ? ` · possible duplicate of #${i.duplicate_of}` : ""}
     ${i.suggestion.source === "fallback" ? " · backup classifier" : ""}`;
   return `<li><button class="item" data-id="${i.id}" aria-pressed="${i.id === state.selected}">
-    <div class="tag ${scope === "mine" ? (i.priority || "") : p}"><div class="title">#${i.id} ${esc(i.title)}${i.external_key ? `<span class="ext">${esc(i.external_key)}</span>` : ""}${i.sync_status === "failed" ? `<span class="ext sync-failed">sync failed</span>` : ""}</div>
+    <div class="tag ${scope === "mine" ? (i.priority || "") : p}"><div class="title">#${i.id} ${esc(i.title)}${scope !== "all" && (state.user.projects || []).length > 1 && i.project_name ? `<span class="ext">${esc(i.project_name)}</span>` : ""}${i.external_key ? `<span class="ext">${esc(i.external_key)}</span>` : ""}${i.sync_status === "failed" ? `<span class="ext sync-failed">sync failed</span>` : ""}</div>
     <div class="meta">${meta}</div></div></button></li>`;
 }
 

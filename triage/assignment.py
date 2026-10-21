@@ -30,12 +30,14 @@ def rank_developers(module, similar_issue_ids=(), limit=3, project_id=None):
              f"fixed similar issue {', '.join('#' + str(i) for i in fixed)}" if fixed else None),
             ("module_experience", min(experience, 4),
              f"{experience} past fix(es) in this module" if experience else None),
-            ("open_issue", d["open_count"], f"{d['open_count']} open assignment(s)"),
+            ("open_issue", d["open_total"], f"{d['open_total']} open assignment(s)"
+             + (f", {d['open_total'] - d['open_count']} in other projects"
+                if d["open_total"] > d["open_count"] else "")),
         ]
         score = sum(WEIGHTS[k] * n for k, n, _ in parts)
         ranked.append({
             "id": d["id"], "name": d["display_name"], "score": round(score, 1),
-            "open_count": d["open_count"], "modules": d["modules"],
+            "open_count": d["open_total"], "modules": d["modules"],
             "reasons": [text for _, _, text in parts if text],
         })
     ranked.sort(key=lambda c: (-c["score"], c["open_count"], c["id"]))

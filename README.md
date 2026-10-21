@@ -104,7 +104,10 @@ can opt in to the generic seeded fixes.
 The first project is created from `.env` (`TRACKER`, `GITHUB_REPO`, ...) and follows it until an
 administrator edits its connection. For more repositories, add one token per project to `.env`
 under any name (for example `GITHUB_TOKEN_BOOKING=...`) and enter that name on the project.
-Each project's webhook URL is `https://<your-server>/api/webhooks/<short name>`.
+Each project's webhook URL is `https://<your-server>/api/webhooks/<short name>`. The older
+`/api/webhooks/github` keeps working for the oldest GitHub project. Once a second project exists,
+the first project stops following `.env`, and a project that has imported issues cannot be pointed
+at another repository. Archived projects are read-only: no imports, no tracker updates.
 
 ## User roles
 
