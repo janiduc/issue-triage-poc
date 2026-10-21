@@ -474,7 +474,7 @@ function planPanel(i) {
     <div id="assign-part" ${p.action === "assign" ? "" : "hidden"}>
       <div class="facts" style="gap:8px 12px">
         <span><label for="o-type">Type</label>${selectHtml("o-type", state.options.types, p.classification.type)}</span>
-        <span><label for="o-module">Module</label>${selectHtml("o-module", state.options.modules, p.classification.module)}</span>
+        <span><label for="o-module">Module</label>${selectHtml("o-module", (i.project && i.project.modules) || state.options.modules, p.classification.module)}</span>
         <span><label for="o-priority">Priority</label>${selectHtml("o-priority", state.options.priorities, p.classification.priority)}</span>
       </div>
       <h3>Assign to</h3>

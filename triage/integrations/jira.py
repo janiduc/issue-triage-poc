@@ -48,6 +48,7 @@ class JiraConnector(TrackerConnector):
     def __init__(self, base_url, email, token, project, webhook_secret=None):
         self.base = (base_url or "").rstrip("/")
         self.email, self.token, self.project, self.secret = email, token, project, webhook_secret
+        self.modules = None  # set from the desk project, so old module labels are cleared too
 
     def configured(self):
         return bool(self.base and self.email and self.token and self.project)
@@ -117,7 +118,7 @@ class JiraConnector(TrackerConnector):
         self._req("PUT", f"/issue/{external_id}", json={
             # Removing a label the issue does not have is a no-op in Jira, so old
             # type-/module-/priority- labels are cleared without reading them first.
-            "update": {"labels": [{"remove": l} for l in sorted(all_managed_labels() - set(write.labels))]
+            "update": {"labels": [{"remove": l} for l in sorted(all_managed_labels(self.modules) - set(write.labels))]
                        + [{"add": l} for l in write.labels]},
             "fields": {"priority": {"name": PRIORITY_MAP[write.priority]}}})
         if write.assignee:

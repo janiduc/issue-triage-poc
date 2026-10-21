@@ -361,3 +361,79 @@ class ProjectAccessTests(Base):
         self.assertEqual(blead.get("/api/metrics?project=booking").get_json()["total"], 1)
         self.assertEqual(self.admin.get("/api/metrics").get_json()["total"], 2)
         self.assertEqual(self.admin.get("/api/metrics?project=booking").get_json()["total"], 1)
+
+
+class ProjectAITests(Base):
+    """Phase 5: knowledge, classifier and modules are per project."""
+
+    def setUp(self):
+        super().setUp()
+        admin = self.as_user("admin")
+        admin.post("/api/admin/projects", json={"slug": "booking", "name": "Booking API", "tracker": "none",
+                                                "modules": ["bookings", "payments", "other"]})
+        self.booking = db.get_project_by_slug("booking")["id"]
+        self.lead_id = db.get_user_by_username("lead")["id"]
+        db.set_membership(self.booking, self.lead_id, "triage_lead")
+        db.set_membership(self.booking, db.get_user_by_username("dev.platform")["id"], "developer", ["bookings"])
+        self.lead = self.as_user("lead")
+
+    def submit_in(self, slug, title, text, reply=None, side_effect=None):
+        from unittest import mock
+        from triage import llm
+        kwargs = {"side_effect": side_effect} if side_effect else {"return_value": reply or llm_reply()}
+        with mock.patch.object(llm, "call_model", **kwargs):
+            return self.lead.post("/api/issues", json={"title": title, "description": text, "project": slug}).get_json()
+
+    # PI1: a fix recorded in one project is never suggested in another
+    def test_pi1_knowledge_is_isolated(self):
+        text = "Gift card balance is not deducted when a discount code is also applied at checkout."
+        first = self.submit_in("simulated", "Gift card ignored with discount", text)
+        self.lead.post(f"/api/issues/{first['id']}/triage", json={"action": "accept"})
+        self.assertEqual(db.get_issue(first["id"])["assignee_id"], db.get_user_by_username("dev.payments")["id"])
+        dev = self.as_user("dev.payments")
+        dev.post(f"/api/issues/{first['id']}/resolve", json={"resolution": "Gift card now applied before discounts."})
+        again_a = self.submit_in("simulated", "Gift card not used with promo code", text)
+        again_b = self.submit_in("booking", "Gift card not used with promo code", text)
+        self.assertIn(first["id"], [s["id"] for s in again_a["similar_issues"]])
+        self.assertNotIn(first["id"], [s["id"] for s in again_b["similar_issues"]])
+        self.assertEqual(again_b["similar_issues"], [])                 # the seed fixes are not shared
+
+    # PI2: a module that exists only in one project is accepted there and rejected elsewhere
+    def test_pi2_modules_are_per_project(self):
+        in_booking = self.submit_in("booking", "Double booking", "Two guests got the same room.",
+                                    llm_reply(module="bookings"))
+        self.assertEqual((in_booking["suggestion"]["module"], in_booking["suggestion"]["source"]), ("bookings", "llm"))
+        in_first = self.submit_in("simulated", "Double booking", "Two guests got the same room.",
+                                  llm_reply(module="bookings"))
+        self.assertEqual(in_first["suggestion"]["source"], "fallback")  # invalid twice -> backup classifier
+
+    # PI3: the model is told the project's modules
+    def test_pi3_prompt_lists_project_modules(self):
+        from triage import llm
+        seen = {}
+
+        def fake(msg, modules=None):
+            seen["modules"] = modules
+            return llm_reply(module="bookings")
+        self.submit_in("booking", "Double booking", "Two guests got the same room.", side_effect=fake)
+        self.assertEqual(seen["modules"], ["bookings", "payments", "other"])
+        self.assertIn("bookings", llm.system_prompt(seen["modules"]))
+        self.assertIn("bookings", str(llm.output_schema(seen["modules"])))
+
+    # PI4: the backup classifier only answers with the project's modules
+    def test_pi4_backup_classifier_uses_project_modules(self):
+        os.environ["LLM_ENABLED"] = "false"
+        try:
+            issue = self.submit_in("booking", "Room page slow", "The room list page takes thirty seconds to load.")
+        finally:
+            os.environ["LLM_ENABLED"] = "true"
+        self.assertEqual(issue["suggestion"]["source"], "fallback")
+        self.assertIn(issue["suggestion"]["module"], ["bookings", "payments", "other"])
+
+    # PI5: a project can opt in to the generic seeded fixes
+    def test_pi5_optional_shared_seed(self):
+        text = "Applying any discount code at checkout shows a server error and the order fails."
+        self.assertEqual(self.submit_in("booking", "Discount code error", text)["similar_issues"], [])
+        self.as_user("admin").patch("/api/admin/projects/booking", json={"share_seed": True})
+        shared = self.submit_in("booking", "Discount code error", text)
+        self.assertTrue(shared["similar_issues"])

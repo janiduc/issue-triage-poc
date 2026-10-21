@@ -30,9 +30,11 @@ def connector_for(project):
         return GitHubConnector(_env(project.get("token_env")), project.get("repo"),
                                _env(project.get("secret_env")))
     if tracker == "jira":
-        return JiraConnector(project.get("base_url"), _env(project.get("email_env")),
-                             _env(project.get("token_env")), project.get("repo"),
-                             _env(project.get("secret_env")))
+        connector = JiraConnector(project.get("base_url"), _env(project.get("email_env")),
+                                  _env(project.get("token_env")), project.get("repo"),
+                                  _env(project.get("secret_env")))
+        connector.modules = project.get("modules")
+        return connector
     if tracker == "simulated":
         return SimulatedConnector(simulated_path(project))
     return TrackerConnector()

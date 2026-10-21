@@ -102,7 +102,7 @@ class Pipeline:
             return False
         db.save_resolution(issue_id, ext.resolution, None)  # None: no note, so not reused as a fix
         db.set_sync(issue_id, sync_pending=None, sync_status="ok", sync_error=None)
-        self.service.refresh()
+        self.service.refresh(self.project_id)
         db.log_sync(issue_id, self.name, "in", "closed_in_tracker", True,
                     "with resolution note" if ext.resolution else "no resolution note")
         return True

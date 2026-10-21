@@ -34,7 +34,7 @@ def _as_id(value):
     return None
 
 
-def validate_llm_output(data, allowed_ids) -> dict:
+def validate_llm_output(data, allowed_ids, modules=None) -> dict:
     """Check the model's JSON against the schema. Raises ValidationError if invalid.
 
     allowed_ids: ids of past issues actually shown to the model. Any other id the
@@ -46,7 +46,7 @@ def validate_llm_output(data, allowed_ids) -> dict:
         data = next(iter(data.values()))  # e.g. {"result": {...}} from a small model
     out = {}
     for field, allowed in (("type", config.ISSUE_TYPES),
-                           ("module", config.MODULES),
+                           ("module", modules or config.MODULES),
                            ("priority", config.PRIORITIES)):
         value = str(data.get(field, "")).strip().lower()
         if value not in allowed:

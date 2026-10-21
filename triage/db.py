@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS projects (
     modules TEXT NOT NULL,               -- JSON list of this project's modules
     active INTEGER NOT NULL DEFAULT 1,
     managed_by_env INTEGER NOT NULL DEFAULT 0, -- 1: tracker settings follow .env (the first project)
+    share_seed INTEGER NOT NULL DEFAULT 0, -- 1: also learn from the generic seeded fixes
     last_sync TEXT,
     sync_since TEXT,
     created_at TEXT NOT NULL
@@ -188,6 +189,8 @@ def migrate_projects(conn):
       their current role and modules (an admin needs no membership: admin stays global);
     - moves the old per-tracker sync state onto the project.
     """
+    if "share_seed" not in _columns(conn, "projects"):
+        conn.execute("ALTER TABLE projects ADD COLUMN share_seed INTEGER NOT NULL DEFAULT 0")
     if "managed_by_env" not in _columns(conn, "projects"):
         conn.execute("ALTER TABLE projects ADD COLUMN managed_by_env INTEGER NOT NULL DEFAULT 0")
         conn.execute("UPDATE projects SET managed_by_env = 1 WHERE id = (SELECT MIN(id) FROM projects)")
@@ -269,6 +272,7 @@ def project_to_dict(row):
     d = dict(row)
     d["modules"] = json.loads(d.get("modules") or "[]")
     d["active"] = bool(d["active"])
+    d["share_seed"] = bool(d.get("share_seed"))
     return d
 
 
@@ -307,7 +311,7 @@ def create_project(slug, name, tracker="none", modules=None, **fields):
 
 
 PROJECT_FIELDS = {"name", "tracker", "repo", "base_url", "token_env", "email_env", "secret_env",
-                  "modules", "active", "last_sync", "sync_since", "managed_by_env"}
+                  "modules", "active", "last_sync", "sync_since", "managed_by_env", "share_seed"}
 
 
 def update_project(project_id, **fields):
@@ -713,20 +717,31 @@ def sync_events(limit=100, project_id=None):
         return [dict(r) for r in conn.execute(sql + " ORDER BY id DESC LIMIT ?", params + [limit])]
 
 
-def knowledge_base():
-    """Resolved issues with a resolution: used for similarity search and recommendations."""
+def knowledge_base(project_id=None, include_seed=False):
+    """Resolved issues with a resolution, for similarity search and recommendations. Per project:
+    one project's fixes are never suggested in another. include_seed adds the generic seeded fixes
+    (they live in the first project) for a new project that opted in."""
+    sql = ("SELECT id, title, description, resolution FROM issues "
+           "WHERE status = 'resolved' AND resolution IS NOT NULL")
+    params = []
+    if project_id is not None:
+        sql += " AND (project_id = ?" + (" OR is_seed = 1)" if include_seed else ")")
+        params.append(project_id)
     with connect() as conn:
-        rows = conn.execute("SELECT id, title, description, resolution FROM issues "
-                            "WHERE status = 'resolved' AND resolution IS NOT NULL").fetchall()
-        return [dict(r) for r in rows]
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
-def labelled_issues():
+def labelled_issues(project_id=None, seed_only=False):
     """Issues with human-confirmed labels: used to train the fallback classifier."""
+    sql, params = ("SELECT title, description, final_type, final_module, final_priority "
+                   "FROM issues WHERE final_type IS NOT NULL"), []
+    if seed_only:
+        sql += " AND is_seed = 1"
+    elif project_id is not None:
+        sql += " AND project_id = ?"
+        params.append(project_id)
     with connect() as conn:
-        rows = conn.execute("SELECT title, description, final_type, final_module, final_priority "
-                            "FROM issues WHERE final_type IS NOT NULL").fetchall()
-        return [dict(r) for r in rows]
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
 # ---------- settings and audit ----------

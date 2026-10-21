@@ -32,27 +32,60 @@ def confidence_threshold() -> float:
     return float(db.get_setting("confidence_threshold", config.CONFIDENCE_THRESHOLD))
 
 
+MIN_PROJECT_LABELS = 20  # below this, a project's backup classifier learns from the seed data
+
+
 class TriageService:
+    """Shared AI workflow; each project has its own knowledge base and backup classifier."""
+
     def __init__(self):
-        self.baseline = BaselineClassifier()
-        self.index = SimilarityIndex()
+        self.indexes, self.baselines = {}, {}
         self.agent = TriageAgent(self)
         self.refresh()
 
-    def refresh(self):
-        """Retrain the backup classifier and rebuild the similarity index from the database."""
-        self.baseline.fit(db.labelled_issues())
-        self.index.build(db.knowledge_base())
+    @property
+    def index(self):  # the first project's index (health endpoint, single-project callers)
+        return self.index_for(db.default_project_id())
+
+    def refresh(self, project_id=None):
+        """Rebuild the similarity index and retrain the backup classifier: for one project, or
+        for every project when none is given."""
+        ids = [project_id] if project_id is not None else [p["id"] for p in db.list_projects()]
+        for pid in ids:
+            project = db.get_project(pid)
+            self.indexes[pid] = SimilarityIndex().build(
+                db.knowledge_base(pid, include_seed=bool(project and project["share_seed"])))
+            labelled = db.labelled_issues(pid)
+            if len(labelled) < MIN_PROJECT_LABELS:
+                labelled = db.labelled_issues(seed_only=True) + labelled
+            self.baselines[pid] = BaselineClassifier().fit(labelled)
+
+    def index_for(self, project_id):
+        if project_id not in self.indexes:
+            self.refresh(project_id)
+        return self.indexes[project_id]
+
+    def baseline_for(self, project_id):
+        if project_id not in self.baselines:
+            self.refresh(project_id)
+        return self.baselines[project_id]
+
+    @staticmethod
+    def modules_for(project_id):
+        project = db.get_project(project_id) if project_id is not None else None
+        return (project or {}).get("modules") or config.MODULES
 
     # ----- public workflow -----
 
     def triage_new(self, title, description, reporter_id, external=None, project_id=None):
         title, n1 = redact(title)
         description, n2 = redact(description)
-        ai = self._analyse(title, description)
-        ai["redactions"] = n1 + n2
         if external is None and project_id is not None:
             external = {"source": "desk", "project_id": project_id}
+        if project_id is None:
+            project_id = (external or {}).get("project_id") or db.default_project_id()
+        ai = self._analyse(title, description, project_id)
+        ai["redactions"] = n1 + n2
         issue_id = db.insert_issue(title, description, reporter_id, ai, external)
         self.create_plan(issue_id)
         return issue_id
@@ -61,7 +94,7 @@ class TriageService:
         """Reporter supplied more detail: append it, re-run the analysis and the agent."""
         extra, n = redact(extra)
         description = f"{issue['description']}\n\nAdditional information: {extra}"
-        ai = self._analyse(issue["title"], description)
+        ai = self._analyse(issue["title"], description, issue["project_id"])
         ai["redactions"] = (issue.get("redactions") or 0) + n
         db.update_after_retriage(issue["id"], description, ai)
         self.create_plan(issue["id"])
@@ -81,27 +114,31 @@ class TriageService:
                 reason = f"Agent error ({type(exc).__name__})"
         else:
             reason = "Agent switched off or AI service not configured"
-        plan, candidates = rules_plan(issue, self.index, confidence_threshold())
+        plan, candidates = rules_plan(issue, self.index_for(issue["project_id"]), confidence_threshold())
         return db.insert_plan(issue_id, "rules", plan, candidates, [], fallback_reason=reason)
 
     # ----- internals -----
 
-    def _analyse(self, title, description):
+    def _analyse(self, title, description, project_id=None):
         started = time.perf_counter()
+        if project_id is None:
+            project_id = db.default_project_id()
+        modules = self.modules_for(project_id)
+        index = self.index_for(project_id)
         text = f"{title}. {description}"
-        similar = self.index.search(text)
+        similar = index.search(text)
 
         source, fallback_reason, usage = "llm", None, {}
         if not ai_enabled():
             fallback_reason = "AI service not configured or switched off by an administrator"
         else:
             try:
-                result, usage = triage_with_llm(title, description, similar)
+                result, usage = triage_with_llm(title, description, similar, modules)
             except LLMError as exc:
                 fallback_reason = str(exc)
         if fallback_reason:
             source = "fallback"
-            result = self._fallback(text, similar)
+            result = self._fallback(text, similar, project_id, modules, index)
 
         reasons = []
         if source == "fallback":
@@ -126,10 +163,12 @@ class TriageService:
             "tokens_in": usage.get("input_tokens"), "tokens_out": usage.get("output_tokens"),
         }
 
-    def _fallback(self, text, similar):
-        pred = self.baseline.predict(text)
+    def _fallback(self, text, similar, project_id, modules, index):
+        pred = self.baseline_for(project_id).predict(text)
+        if pred["module"] not in modules:  # learned from seed data with other modules
+            pred["module"] = "other" if "other" in modules else modules[0]
         top = similar[0] if similar else None
-        is_dup = bool(top and top["similarity"] >= self.index.duplicate_threshold)
+        is_dup = bool(top and top["similarity"] >= index.duplicate_threshold)
         return {
             "type": pred["type"], "module": pred["module"], "priority": pred["priority"],
             "confidence": pred["confidence"],

@@ -137,7 +137,7 @@ def create_app():
         role = project_role(g.user, issue["project_id"])
         data = to_api(issue, "reporter" if view == "reporter" else role)
         project = db.get_project(issue["project_id"])
-        data["project"] = {"slug": project["slug"], "name": project["name"]}
+        data["project"] = {"slug": project["slug"], "name": project["name"], "modules": project["modules"]}
         data["my_role"] = role
         if role == "triage_lead":
             data["plan"] = db.latest_plan(issue_id)
@@ -224,7 +224,9 @@ def create_app():
     @app.get("/api/options")
     @require_roles()
     def options():
-        return jsonify(types=config.ISSUE_TYPES, modules=config.MODULES,
+        slug = request.args.get("project")
+        project = db.get_project_by_slug(slug) if slug else None
+        return jsonify(types=config.ISSUE_TYPES, modules=(project or {}).get("modules") or config.MODULES,
                        priorities=config.PRIORITIES, roles=config.ROLES,
                        role_labels=config.ROLE_LABELS)
 
@@ -310,7 +312,7 @@ def create_app():
             "type": issue["ai_type"], "module": issue["ai_module"], "priority": issue["ai_priority"]}
         final = dict(base)
         if action == "override":
-            for field, allowed in (("type", config.ISSUE_TYPES), ("module", config.MODULES),
+            for field, allowed in (("type", config.ISSUE_TYPES), ("module", service.modules_for(issue["project_id"])),
                                    ("priority", config.PRIORITIES)):
                 if data.get(field):
                     if data[field] not in allowed:
@@ -406,7 +408,7 @@ def create_app():
         resolution = text_field(body(), "resolution", 5, "Resolution")
         db.save_resolution(issue_id, resolution, g.user["id"])
         db.audit(g.user["id"], "issue_resolved", issue_id)
-        service.refresh()  # the fix now helps with future similar issues
+        service.refresh(issue["project_id"])  # the fix now helps with similar issues in this project
         if body().get("close_in_tracker", True):
             pipelines.for_issue(issue).queue(issue_id, "close", text=f"Resolved: {resolution}")
         return issue_response(issue_id)
@@ -500,7 +502,8 @@ def create_app():
         modules = data.get("modules") or []
         if role != "developer":
             return []
-        if not isinstance(modules, list) or any(m not in config.MODULES for m in modules):
+        if not isinstance(modules, list) or any(m not in service.modules_for(db.default_project_id())
+                                                for m in modules):
             raise ValidationError("Unknown module in the list.")
         return modules
 
@@ -629,6 +632,8 @@ def create_app():
             out["modules"] = modules
         if "active" in data:
             out["active"] = int(bool(data["active"]))
+        if "share_seed" in data:
+            out["share_seed"] = int(bool(data["share_seed"]))
         return out
 
     def project_summary(project):
@@ -666,6 +671,8 @@ def create_app():
         if any(k in body() for k in tracker_keys):
             fields["managed_by_env"] = 0  # edited by an administrator: stop following .env
         db.update_project(project["id"], **fields)
+        if {"modules", "share_seed"} & set(fields):
+            service.refresh(project["id"])
         db.audit(g.user["id"], "project_updated", detail={"project": slug, "changed": sorted(body())})
         return jsonify(project_summary(db.get_project(project["id"])))
 
