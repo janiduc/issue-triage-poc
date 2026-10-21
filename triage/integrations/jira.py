@@ -48,6 +48,7 @@ class JiraConnector(TrackerConnector):
     def __init__(self, base_url, email, token, project, webhook_secret=None):
         self.base = (base_url or "").rstrip("/")
         self.email, self.token, self.project, self.secret = email, token, project, webhook_secret
+        self.modules = None  # set from the desk project, so old module labels are cleared too
 
     def configured(self):
         return bool(self.base and self.email and self.token and self.project)
@@ -117,7 +118,7 @@ class JiraConnector(TrackerConnector):
         self._req("PUT", f"/issue/{external_id}", json={
             # Removing a label the issue does not have is a no-op in Jira, so old
             # type-/module-/priority- labels are cleared without reading them first.
-            "update": {"labels": [{"remove": l} for l in sorted(all_managed_labels() - set(write.labels))]
+            "update": {"labels": [{"remove": l} for l in sorted(all_managed_labels(self.modules) - set(write.labels))]
                        + [{"add": l} for l in write.labels]},
             "fields": {"priority": {"name": PRIORITY_MAP[write.priority]}}})
         if write.assignee:
@@ -136,6 +137,16 @@ class JiraConnector(TrackerConnector):
         if not done:
             raise SyncError("Jira: no transition to a Done status is available for this issue")
         self._req("POST", f"/issue/{external_id}/transitions", json={"transition": {"id": done[0]["id"]}})
+
+    def check(self):
+        if not self.configured():
+            return {"ok": False, "assignable": [],
+                    "message": "Jira URL, email, token or project key missing."}
+        try:
+            self._req("GET", f"/project/{self.project}")
+        except SyncError as exc:
+            return {"ok": False, "message": str(exc), "assignable": []}
+        return {"ok": True, "message": f"Connected to Jira project {self.project}.", "assignable": []}
 
     def account_for(self, user_row):
         return user_row["jira_account_id"] if user_row else None

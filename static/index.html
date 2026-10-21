@@ -122,6 +122,7 @@
   .labels span { display: inline-block; border: 1px solid var(--rule); border-radius: 999px; padding: 0 8px; margin: 2px 4px 2px 0; font-size: .85rem; }
   .comments { margin: 6px 0 0; padding-left: 18px; font-size: .9rem; }
   .inline-input { max-width: 180px; padding: 4px 6px; font-size: .9rem; }
+  #pa-role { max-width: 200px; }
 </style>
 </head>
 <body>
@@ -147,7 +148,9 @@
   <header>
     <h1>Issue triage desk</h1>
     <nav id="nav" aria-label="Main"></nav>
-    <div class="who"><span><b id="who-name"></b></span><span class="role-badge" id="who-role"></span>
+    <div class="who"><label for="proj-switch" class="hint" id="proj-label" style="margin:0" hidden>Project</label>
+      <select id="proj-switch" hidden style="width:auto"></select>
+      <span><b id="who-name"></b></span><span class="role-badge" id="who-role"></span>
       <button class="secondary" id="logout">Sign out</button></div>
   </header>
   <main id="view"></main>
@@ -172,10 +175,17 @@ const VIEWS = {
   reporter:    [["report", "Report an issue"], ["mine", "My issues"]],
   triage_lead: [["queue", "Triage queue"], ["insights", "Insights"], ["tracker", "Tracker"], ["report", "Report an issue"]],
   developer:   [["assigned", "My assignments"], ["report", "Report an issue"], ["mine", "Issues I reported"]],
-  admin:       [["users", "Users and roles"], ["settings", "AI settings"], ["tracker", "Tracker"], ["audit", "Activity log"], ["insights", "Insights"]],
+  admin:       [["projects", "Projects"], ["users", "Users and roles"], ["settings", "AI settings"], ["tracker", "Tracker"], ["audit", "Activity log"], ["insights", "Insights"]],
 };
 
-const state = { user: null, options: null, view: null, status: "new", selected: null };
+const state = { user: null, options: null, view: null, status: "new", selected: null, project: null };
+
+// The selected project decides the role (and so the screens) for everyone but the administrator.
+const currentProject = () => (state.user.projects || []).find((p) => p.slug === state.project) || null;
+const roleNow = () => state.user.role === "admin" ? "admin" : (currentProject() ? currentProject().role : "reporter");
+const withProject = (path) => state.project ? path + (path.includes("?") ? "&" : "?") + "project=" + encodeURIComponent(state.project) : path;
+const remember = (slug) => { try { localStorage.setItem("triage-project", slug); } catch (e) { /* storage unavailable */ } };
+const recalled = () => { try { return localStorage.getItem("triage-project"); } catch (e) { return null; } };
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts});
@@ -203,8 +213,22 @@ async function startApp(user) {
   state.options = await api("/api/options");
   $("#login").hidden = true; $("#shell").hidden = false;
   $("#who-name").textContent = user.display_name;
-  $("#who-role").textContent = state.options.role_labels[user.role];
-  const views = VIEWS[user.role];
+  const projects = user.projects || [];
+  const saved = recalled();
+  state.project = (projects.find((p) => p.slug === saved) || projects[0] || {}).slug || null;
+  const sw = $("#proj-switch");
+  if (user.role === "admin" && saved === "") state.project = null;  // remembered "All projects"
+  sw.innerHTML = (user.role === "admin" ? `<option value="" ${state.project ? "" : "selected"}>All projects</option>` : "")
+    + projects.map((p) => `<option value="${esc(p.slug)}" ${p.slug === state.project ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+  sw.hidden = $("#proj-label").hidden = projects.length < 2 && user.role !== "admin";
+  sw.onchange = () => { state.project = sw.value || null; remember(sw.value); state.status = "new"; buildNav(); };
+  buildNav();
+}
+
+function buildNav() {
+  const role = roleNow();
+  $("#who-role").textContent = state.options.role_labels[role] + (currentProject() && state.user.role !== "admin" ? ` · ${currentProject().name}` : "");
+  const views = role === "reporter" && !currentProject() ? [["mine", "My issues"]] : VIEWS[role];
   $("#nav").innerHTML = views.map(([id, label]) => `<button data-view="${id}">${label}</button>`).join("");
   $$("#nav button").forEach((b) => b.onclick = () => go(b.dataset.view));
   go(views[0][0]);
@@ -227,7 +251,7 @@ function go(view) {
     ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"));
   ({report: viewReport, mine: () => viewList("mine"), assigned: () => viewList("assigned"),
     queue: () => viewList("all"), insights: viewInsights, users: viewUsers,
-    settings: viewSettings, audit: viewAudit, tracker: viewTracker})[view]();
+    settings: viewSettings, audit: viewAudit, tracker: viewTracker, projects: viewProjects})[view]();
 }
 
 /* ---------- report an issue (reporter, developer, lead) ---------- */
@@ -251,11 +275,11 @@ function viewReport() {
     msg.className = ""; msg.textContent = "";
     btn.disabled = true; btn.textContent = "Submitting…";
     try {
-      const issue = await post("/api/issues", {title: $("#title").value, description: $("#description").value});
+      const issue = await post("/api/issues", {title: $("#title").value, description: $("#description").value, project: state.project});
       e.target.reset();
       msg.className = "success";
       msg.textContent = `Issue #${issue.id} submitted. You can follow its progress under ${
-        state.user.role === "triage_lead" ? "Triage queue" : state.user.role === "developer" ? "Issues I reported" : "My issues"}.`;
+        roleNow() === "triage_lead" ? "Triage queue" : roleNow() === "developer" ? "Issues I reported" : "My issues"}.`;
     } catch (err) { msg.className = "error"; msg.textContent = err.message; }
     finally { btn.disabled = false; btn.textContent = "Submit issue"; }
   };
@@ -272,7 +296,7 @@ const EMPTY = {
 
 async function viewList(scope) {
   const isQueue = scope === "all";
-  const title = {mine: state.view === "mine" && state.user.role === "developer" ? "Issues I reported" : "My issues",
+  const title = {mine: state.view === "mine" && roleNow() === "developer" ? "Issues I reported" : "My issues",
                  assigned: "My assignments", all: "Triage queue"}[scope];
   $("#view").innerHTML = `<div class="split">
     <section><h2>${title}</h2>
@@ -286,18 +310,18 @@ async function viewList(scope) {
     <section id="detail"><p class="empty">Select an issue to see its details.</p></section></div>`;
   if (isQueue) {
     $$(".tabs button").forEach((b) => b.onclick = () => { state.status = b.dataset.status; viewList(scope); });
-    api("/api/integration").then((t) => {
+    api(withProject("/api/integration")).then((t) => {
       if (!t.configured) return;
       $("#q-sync").hidden = false;
       $("#q-sync").innerHTML = `<button class="secondary" id="sync-now">Import from ${esc(t.label)}</button>
         <span class="hint" id="sync-msg">${t.last_sync ? "Last sync " + when(t.last_sync) : "Not synced yet"}${t.pending_writes ? ` · ${t.pending_writes} update(s) waiting to be sent` : ""}</span>`;
       $("#sync-now").onclick = () => runSync($("#sync-now"), $("#sync-msg"), () => viewList(scope));
     }).catch(() => {});
-    api("/api/metrics").then((m) => { $("#q-metrics").textContent =
+    api(withProject("/api/metrics")).then((m) => { $("#q-metrics").textContent =
       `${m.by_status.new} awaiting triage · ${m.reviewed} reviewed · first-pass priority kept ${pct(m.agreement.priority)} · backup classifier used ${pct(m.fallback_rate)}`; }).catch(() => {});
   }
   const params = new URLSearchParams({scope});
-  if (isQueue) params.set("status", state.status);
+  if (isQueue) { params.set("status", state.status); if (state.project) params.set("project", state.project); }
   try {
     const issues = await api(`/api/issues?${params}`);
     const key = isQueue ? (state.status === "assigned" ? "assigned_q" : state.status) : scope;
@@ -366,7 +390,7 @@ function trackerLine(i) {
 }
 
 function fullDetail(i) {
-  const s = i.suggestion, role = state.user.role;
+  const s = i.suggestion, role = i.my_role || roleNow();
   const p = i.final.priority || s.priority;
   const similar = i.similar_issues.length
     ? `<ul class="plain">${i.similar_issues.map((x) => `<li><b>#${x.id} ${esc(x.title)}</b>
@@ -390,7 +414,7 @@ function fullDetail(i) {
   }
 
   return `<h2>#${i.id} ${esc(i.title)}</h2>
-    <p class="hint">Reported by ${esc(i.reporter_name || "unknown")} · ${when(i.created_at)}
+    <p class="hint">${i.project ? esc(i.project.name) + " · " : ""}Reported by ${esc(i.reporter_name || "unknown")} · ${when(i.created_at)}
       ${i.assignee_name ? ` · Assigned to ${esc(i.assignee_name)}` : ""}
       ${i.triage_count > 1 ? ` · re-analysed after the reporter added details` : ""}</p>
     ${trackerLine(i)}
@@ -452,7 +476,7 @@ function planPanel(i) {
     <div id="assign-part" ${p.action === "assign" ? "" : "hidden"}>
       <div class="facts" style="gap:8px 12px">
         <span><label for="o-type">Type</label>${selectHtml("o-type", state.options.types, p.classification.type)}</span>
-        <span><label for="o-module">Module</label>${selectHtml("o-module", state.options.modules, p.classification.module)}</span>
+        <span><label for="o-module">Module</label>${selectHtml("o-module", (i.project && i.project.modules) || state.options.modules, p.classification.module)}</span>
         <span><label for="o-priority">Priority</label>${selectHtml("o-priority", state.options.priorities, p.classification.priority)}</span>
       </div>
       <h3>Assign to</h3>
@@ -505,7 +529,7 @@ function wireDetail(i) {
   preview();
 
   const shortlist = new Set((i.plan.candidates || []).map((c) => c.id));
-  api("/api/developers").then((devs) => {
+  api(withProject("/api/developers")).then((devs) => {
     $("#other-dev").innerHTML += devs.filter((d) => !shortlist.has(d.id))
       .map((d) => `<option value="${d.id}">${esc(d.name)} (${d.open_count} open)</option>`).join("");
   }).catch(() => {});
@@ -528,7 +552,7 @@ function wireDetail(i) {
 async function runSync(btn, msgEl, after) {
   btn.disabled = true; const label = btn.textContent; btn.textContent = "Importing…";
   try {
-    const r = await post("/api/integration/sync", {});
+    const r = await post(withProject("/api/integration/sync"), {});
     msgEl.className = r.errors.length ? "error" : "success";
     msgEl.textContent = `${r.imported} new, ${r.replies} reporter repl${r.replies === 1 ? "y" : "ies"}, ${r.closed} closed in tracker, ${r.retried} update(s) re-sent` +
       (r.errors.length ? ` · Problems: ${r.errors.join("; ")}` : "");
@@ -542,7 +566,7 @@ async function runSync(btn, msgEl, after) {
 async function viewInsights() {
   $("#view").innerHTML = `<section><h2>Insights</h2><div id="ins"></div></section>`;
   try {
-    const m = await api("/api/metrics");
+    const m = await api(withProject("/api/metrics"));
     const stat = (n, label) => `<div class="stat"><div class="n">${n ?? "–"}</div><div class="hint">${label}</div></div>`;
     $("#ins").innerHTML = `<div class="stats">
       ${stat(m.total, "issues submitted")} ${stat(m.by_status.new, "awaiting triage")}
@@ -577,7 +601,7 @@ async function viewInsights() {
 async function viewUsers() {
   const o = state.options;
   $("#view").innerHTML = `<section><h2>Users and roles</h2>
-      <p class="hint">Developers are ranked for each issue by the modules they own, their open workload and who fixed similar issues. Map tracker accounts so assignments also appear in GitHub or Jira.</p>
+      <p class="hint">Role and modules here apply to the first project; use Projects to give people roles in other projects. Map tracker accounts so assignments also appear in GitHub or Jira.</p>
       <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Modules owned</th><th>Tracker accounts</th><th>Status</th><th></th></tr></thead>
       <tbody id="users"></tbody></table></div><div id="users-msg" role="alert"></div></section>
     <section class="narrow"><h2>Add a user</h2>
@@ -625,6 +649,130 @@ async function viewUsers() {
   load().catch((e) => msg($("#users-msg"), "error", e.message));
 }
 
+/* ---------- projects (admin): one per repository ---------- */
+
+const TRACKER_NAMES = {github: "GitHub Issues", jira: "Jira", simulated: "Simulated tracker", none: "No tracker"};
+const PROJECT_ROLE_LABELS = {triage_lead: "Triage lead", developer: "Developer", reporter: "Reporter"};
+
+async function viewProjects() {
+  $("#view").innerHTML = `<div class="split">
+    <section><h2>Projects</h2>
+      <p class="hint">Each project is one repository with its own tracker connection, team, modules and knowledge. You see counts only, never issue content.</p>
+      <ul class="list" id="proj-list"></ul>
+      <h3>Add a project</h3>
+      <form id="proj-new">
+        <label for="pn-name">Name</label><input id="pn-name" placeholder="e.g. Booking API">
+        <label for="pn-slug">Short name (used in URLs)</label><input id="pn-slug" placeholder="e.g. booking-api">
+        <label for="pn-tracker">Tracker</label>${selectHtml("pn-tracker", Object.keys(TRACKER_NAMES), "github", TRACKER_NAMES)}
+        <label for="pn-repo">GitHub repository (owner/name)</label><input id="pn-repo" placeholder="e.g. janiduc/booking-api">
+        <div class="row"><button type="submit">Add project</button></div>
+        <div id="pn-msg" role="alert"></div>
+      </form></section>
+    <section id="proj-detail"><p class="empty">Select a project to manage its connection and members.</p></section></div>`;
+  const msg = (el, cls, text) => { el.className = cls; el.textContent = text; };
+
+  async function loadList(select) {
+    const projects = await api("/api/admin/projects");
+    $("#proj-list").innerHTML = projects.map((p) => {
+      const s = p.by_status || {};
+      return `<li><button class="item" data-slug="${esc(p.slug)}" aria-pressed="${p.slug === select}">
+        <div class="tag"><div class="title">${esc(p.name)} ${p.active ? "" : '<span class="ext">archived</span>'}</div>
+        <div class="meta">${esc(TRACKER_NAMES[p.tracker])}${p.repo ? " · " + esc(p.repo) : ""} · ${p.members} member(s) ·
+          ${s.new || 0} awaiting triage · ${s.assigned || 0} with developers ·
+          <span class="${p.configured ? "sync-ok" : "sync-failed"}">${p.configured ? "connected" : "not connected"}</span></div></div></button></li>`;
+    }).join("");
+    $$("#proj-list button.item").forEach((b) => b.onclick = () => openProject(b.dataset.slug));
+    if (select) openProject(select);
+  }
+
+  async function openProject(slug) {
+    $$("#proj-list button.item").forEach((b) => b.setAttribute("aria-pressed", b.dataset.slug === slug));
+    const [projects, members, users] = await Promise.all([api("/api/admin/projects"),
+      api(`/api/admin/projects/${slug}/members`), api("/api/admin/users")]);
+    const p = projects.find((x) => x.slug === slug);
+    const memberIds = new Set(members.map((m) => m.user_id));
+    const candidates = users.filter((u) => u.role !== "admin" && !memberIds.has(u.id) && u.active);
+    const moduleBoxes = (m) => p.modules.map((mod) => `<label class="inline"><input type="checkbox" value="${esc(mod)}" ${m.modules.includes(mod) ? "checked" : ""} ${m.role === "developer" ? "" : "disabled"}>${esc(nice(mod))}</label>`).join("");
+    $("#proj-detail").innerHTML = `<h2>${esc(p.name)}</h2>
+      <p class="hint">Short name <code>${esc(p.slug)}</code>${p.webhook_url ? ` · webhook <code>${location.origin}${esc(p.webhook_url)}</code> (events: Issues, Issue comments)` : ""}</p>
+      <h3>Tracker connection</h3>
+      <label for="pe-tracker">Tracker</label>${selectHtml("pe-tracker", Object.keys(TRACKER_NAMES), p.tracker, TRACKER_NAMES)}
+      <label for="pe-repo">Repository (owner/name) or Jira project key</label><input id="pe-repo" value="${esc(p.repo || "")}">
+      <label for="pe-url">Jira site URL (Jira only)</label><input id="pe-url" value="${esc(p.base_url || "")}">
+      <label for="pe-token">Name of the environment variable holding the token</label><input id="pe-token" value="${esc(p.token_env || "")}" placeholder="e.g. GITHUB_TOKEN_BOOKING">
+      <label for="pe-secret">Name of the environment variable holding the webhook secret</label><input id="pe-secret" value="${esc(p.secret_env || "")}" placeholder="e.g. GITHUB_WEBHOOK_SECRET_BOOKING">
+      <p class="hint">Secrets stay in the server's .env; only their names are stored here.</p>
+      <label for="pe-modules">Modules (comma separated)</label><input id="pe-modules" value="${esc(p.modules.join(", "))}">
+      <div class="row"><button id="pe-save">Save project</button><button class="secondary" id="pe-test">Test connection</button>
+        <button class="secondary" id="pe-archive">${p.active ? "Archive project" : "Restore project"}</button></div>
+      <div id="pe-msg" role="alert"></div>
+      <h3>Members</h3>
+      <div class="table-wrap"><table><thead><tr><th>Member</th><th>Role in this project</th><th>Modules owned</th><th></th></tr></thead>
+        <tbody id="pm-rows">${members.length ? members.map((m) => `<tr data-id="${m.user_id}">
+          <td><b>${esc(m.display_name)}</b><div class="hint">${esc(m.username)}${m.github_login ? " · GitHub " + esc(m.github_login) : ""}</div></td>
+          <td>${selectHtml(`pm-role-${m.user_id}`, Object.keys(PROJECT_ROLE_LABELS), m.role, PROJECT_ROLE_LABELS)}</td>
+          <td>${moduleBoxes(m)}</td>
+          <td><button class="secondary pm-save">Save</button> <button class="secondary pm-remove">Remove from project</button></td></tr>`).join("")
+          : `<tr><td colspan="4" class="empty">No members yet.</td></tr>`}</tbody></table></div>
+      <div id="pm-msg" role="alert"></div>
+      <h3>Add a member</h3>
+      ${candidates.length ? `<div class="row" style="margin-top:0">
+        <select id="pa-user" style="max-width:260px">${candidates.map((u) => `<option value="${u.id}">${esc(u.display_name)} (${esc(u.username)})</option>`).join("")}</select>
+        ${selectHtml("pa-role", Object.keys(PROJECT_ROLE_LABELS), "developer", PROJECT_ROLE_LABELS)}
+        <button id="pa-add">Add to project</button></div>` : `<p class="hint">Every active user is already a member.</p>`}`;
+
+    const fail = (el) => (e) => msg(el, "error", e.message);
+    $("#pe-save").onclick = () => post(`/api/admin/projects/${slug}`, {
+      tracker: $("#pe-tracker").value, repo: $("#pe-repo").value, base_url: $("#pe-url").value,
+      token_env: $("#pe-token").value, secret_env: $("#pe-secret").value,
+      modules: $("#pe-modules").value.split(",").map((s) => s.trim()).filter(Boolean)}, "PATCH")
+      .then(() => { loadList(slug); }, fail($("#pe-msg")));
+    $("#pe-test").onclick = () => post(`/api/admin/projects/${slug}/test`, {}).then((r) => {
+      let text = r.message;
+      if (r.unassignable && r.unassignable.length) text += ` GitHub cannot assign: ${r.unassignable.join(", ")} (check their GitHub login and repository access).`;
+      msg($("#pe-msg"), r.ok ? "success" : "error", text);
+    }, fail($("#pe-msg")));
+    $("#pe-archive").onclick = () => post(`/api/admin/projects/${slug}`, {active: !p.active}, "PATCH")
+      .then(() => loadList(slug), fail($("#pe-msg")));
+    if ($("#pa-add")) $("#pa-add").onclick = () => post(`/api/admin/projects/${slug}/members`,
+      {user_id: +$("#pa-user").value, role: $("#pa-role").value}).then(() => openProject(slug), fail($("#pm-msg")));
+    $$("#pm-rows tr[data-id]").forEach((tr) => {
+      const id = +tr.dataset.id, m = members.find((x) => x.user_id === id);
+      $(`#pm-role-${id}`).onchange = () => $$('input[type="checkbox"]', tr).forEach((c) => c.disabled = $(`#pm-role-${id}`).value !== "developer");
+      $(".pm-save", tr).onclick = () => post(`/api/admin/projects/${slug}/members/${id}`, {
+        role: $(`#pm-role-${id}`).value,
+        modules: $$('input[type="checkbox"]', tr).filter((c) => c.checked).map((c) => c.value)}, "PATCH")
+        .then(() => { openProject(slug); }, fail($("#pm-msg")));
+      $(".pm-remove", tr).onclick = async () => {
+        if (!confirm(`Remove ${m.display_name} (${PROJECT_ROLE_LABELS[m.role]}) from ${p.name}? Their account and other projects are not affected.`)) return;
+        try { await api(`/api/admin/projects/${slug}/members/${id}`, {method: "DELETE"}); openProject(slug); loadList(slug); }
+        catch (e) {
+          if (/open assignments/.test(e.message) && confirm(`${m.display_name} still has open assignments in ${p.name}. Send them back to the lead's queue and remove the member?`)) {
+            api(`/api/admin/projects/${slug}/members/${id}?release=true`, {method: "DELETE"})
+              .then(() => { openProject(slug); loadList(slug); }, fail($("#pm-msg")));
+          } else msg($("#pm-msg"), "error", e.message);
+        }
+      };
+    });
+  }
+
+  $("#proj-new").onsubmit = (e) => {
+    e.preventDefault();
+    post("/api/admin/projects", {name: $("#pn-name").value, slug: $("#pn-slug").value,
+      tracker: $("#pn-tracker").value, repo: $("#pn-repo").value, modules: []})
+      .then((p) => { e.target.reset(); msg($("#pn-msg"), "success", `Added ${p.name}. Fill in its connection on the right.`); loadList(p.slug); },
+            (err) => {
+              // GitHub and Jira need connection details first: create it with no tracker, then edit.
+              if (/repository|Jira/.test(err.message)) {
+                post("/api/admin/projects", {name: $("#pn-name").value, slug: $("#pn-slug").value, tracker: "none", modules: []})
+                  .then((p) => { e.target.reset(); msg($("#pn-msg"), "success", `Added ${p.name}. Choose its tracker and fill in the connection on the right.`); loadList(p.slug); },
+                        (err2) => msg($("#pn-msg"), "error", err2.message));
+              } else msg($("#pn-msg"), "error", err.message);
+            });
+  };
+  loadList().catch((e) => msg($("#pn-msg"), "error", e.message));
+}
+
 async function viewSettings() {
   $("#view").innerHTML = `<div class="narrow"><section><h2>AI settings</h2><div id="set"></div></section></div>`;
   try {
@@ -648,11 +796,11 @@ async function viewSettings() {
 
 async function viewAudit() {
   $("#view").innerHTML = `<section><h2>Activity log</h2>
-    <p class="hint">Who did what and when. Issue text is not stored here.</p>
+    <p class="hint">Who did what and when${state.project ? " in the selected project" : " across all projects"}. Issue text is not stored here.</p>
     <div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Issue</th><th>Details</th></tr></thead>
     <tbody id="audit"></tbody></table></div></section>`;
   try {
-    const rows = await api("/api/admin/audit?limit=200");
+    const rows = await api(withProject("/api/admin/audit?limit=200"));
     $("#audit").innerHTML = rows.length ? rows.map((r) => `<tr><td>${when(r.at)}</td>
       <td>${esc(r.user_name || "unknown")}${r.user_role ? `<div class="hint">${esc(state.options.role_labels[r.user_role])}</div>` : ""}</td>
       <td>${nice(r.action)}</td><td>${r.issue_id ? "#" + r.issue_id : ""}</td>
@@ -667,7 +815,7 @@ async function viewTracker() {
   $("#view").innerHTML = `<section><h2>Issue tracker</h2><div id="trk"></div></section>
     <section id="sim" hidden></section><section id="events" hidden></section>`;
   let t;
-  try { t = await api("/api/integration"); } catch (err) { $("#trk").innerHTML = `<p class="error">${esc(err.message)}</p>`; return; }
+  try { t = await api(withProject("/api/integration")); } catch (err) { $("#trk").innerHTML = `<p class="error">${esc(err.message)}</p>`; return; }
   $("#trk").innerHTML = t.configured ? `
       <p>Connected to <b>${esc(t.label)}</b>. ${t.last_sync ? `Last import ${when(t.last_sync)}.` : "Not imported yet."}
       ${t.pending_writes ? `<b>${t.pending_writes}</b> update(s) waiting to be sent.` : ""}</p>
@@ -690,7 +838,7 @@ async function loadSimulated() {
   const box = $("#sim");
   box.hidden = false;
   try {
-    const st = await api("/api/integration/simulated");
+    const st = await api(withProject("/api/integration/simulated"));
     box.innerHTML = `<h2>Simulated tracker</h2>
       <p class="hint">A stand-in for GitHub or Jira so the full pipeline can be shown offline. Use it to act as a reporter or as someone working directly in the tracker.</p>
       <ul class="plain">${st.issues.map((x) => `<li><b>${esc(x.key)}</b> ${esc(x.title)} <span class="status-pill ${x.state === "closed" ? "resolved" : ""}">${x.state}</span>
@@ -705,17 +853,17 @@ async function loadSimulated() {
       <label for="sim-rep">Reporter</label><input id="sim-rep" value="demo-client">
       <div class="row"><button id="sim-create">Create in tracker</button></div><div id="sim-msg" role="alert"></div>`;
     const msg = (cls, text) => { $("#sim-msg").className = cls; $("#sim-msg").textContent = text; };
-    $("#sim-create").onclick = () => post("/api/integration/simulated/issues",
+    $("#sim-create").onclick = () => post(withProject("/api/integration/simulated/issues"),
       {title: $("#sim-title").value, body: $("#sim-body").value, reporter: $("#sim-rep").value})
       .then((x) => { msg("success", `Created ${x.key}. Import it from the queue or with Import now.`); setTimeout(loadSimulated, 800); },
             (e) => msg("error", e.message));
     $$(".sim-reply").forEach((b) => b.onclick = () => {
       const text = prompt(`Reply on ${b.dataset.key} as the reporter:`);
-      if (text) post(`/api/integration/simulated/issues/${b.dataset.key}/reply`, {body: text}).then(loadSimulated, (e) => msg("error", e.message));
+      if (text) post(withProject(`/api/integration/simulated/issues/${b.dataset.key}/reply`), {body: text}).then(loadSimulated, (e) => msg("error", e.message));
     });
     $$(".sim-close").forEach((b) => b.onclick = () => {
       const text = prompt(`Closing comment for ${b.dataset.key} (how it was fixed):`);
-      if (text) post(`/api/integration/simulated/issues/${b.dataset.key}/close`, {body: text}).then(loadSimulated, (e) => msg("error", e.message));
+      if (text) post(withProject(`/api/integration/simulated/issues/${b.dataset.key}/close`), {body: text}).then(loadSimulated, (e) => msg("error", e.message));
     });
   } catch (err) { box.innerHTML = `<p class="error">${esc(err.message)}</p>`; }
 }

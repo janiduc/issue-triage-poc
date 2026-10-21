@@ -16,6 +16,16 @@ log = logging.getLogger(__name__)
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # small, free, runs locally on CPU
 
 
+_ENCODERS = {}  # one loaded model for every project's index
+
+
+def _encoder():
+    if EMBEDDING_MODEL not in _ENCODERS:
+        from sentence_transformers import SentenceTransformer
+        _ENCODERS[EMBEDDING_MODEL] = SentenceTransformer(EMBEDDING_MODEL)
+    return _ENCODERS[EMBEDDING_MODEL]
+
+
 class SimilarityIndex:
     def __init__(self):
         self.method = "tfidf"
@@ -24,8 +34,7 @@ class SimilarityIndex:
         self._encoder = None
         if config.use_embeddings():
             try:
-                from sentence_transformers import SentenceTransformer
-                self._encoder = SentenceTransformer(EMBEDDING_MODEL)
+                self._encoder = _encoder()
                 self.method = "embeddings"
                 self.duplicate_threshold = 0.75
                 self.min_score = 0.35

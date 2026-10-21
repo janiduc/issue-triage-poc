@@ -1,6 +1,7 @@
 .env
 *.db
 simulated_tracker.json
+simulated_*.json
 evaluation_results.csv
 __pycache__/
 .venv/

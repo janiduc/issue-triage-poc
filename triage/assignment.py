@@ -13,10 +13,11 @@ WEIGHTS = {
 }
 
 
-def rank_developers(module, similar_issue_ids=(), limit=3):
-    devs = db.developer_workload()
+def rank_developers(module, similar_issue_ids=(), limit=3, project_id=None):
+    """Rank the project's developers (the first project when none is given)."""
+    devs = db.developer_workload(project_id)
     similar_fixes = db.resolvers_for(list(similar_issue_ids))
-    module_fixes = db.module_fix_counts(module)
+    module_fixes = db.module_fix_counts(module, project_id)
     ranked = []
     for d in devs:
         owns = module in d["modules"]

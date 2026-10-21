@@ -39,15 +39,35 @@ def reset_failed_logins(username):
 
 
 def current_user():
+    """The signed-in user, with their project memberships read fresh on every request, so a
+    role change or a removal from a project takes effect at once."""
     user_id = session.get("user_id")
     if not user_id:
         return None
     user = db.user_to_dict(db.get_user(user_id))
-    return user if user and user["active"] else None
+    if not user or not user["active"]:
+        return None
+    user["projects"] = {} if user["role"] == "admin" else db.memberships(user["id"])
+    return user
+
+
+def effective_roles(user):
+    """Administrators are global. Everyone else holds the roles of their project memberships,
+    and can always follow the issues they reported themselves."""
+    if user["role"] == "admin":
+        return {"admin"}
+    return {m["role"] for m in user["projects"].values()} | {"reporter"}
+
+
+def project_role(user, project_id):
+    if user["role"] == "admin":
+        return "admin"
+    return user["projects"].get(project_id, {}).get("role")
 
 
 def require_roles(*roles):
-    """Allow the request only for signed-in users with one of the given roles.
+    """Allow the request only for signed-in users holding one of the given roles in at least one
+    project (or admin). Per-issue checks then use the role in that issue's project.
     With no roles listed, any signed-in user is allowed."""
     def decorator(view):
         @wraps(view)
@@ -55,7 +75,7 @@ def require_roles(*roles):
             user = current_user()
             if not user:
                 return jsonify(error="Sign in to continue."), 401
-            if roles and user["role"] not in roles:
+            if roles and not (effective_roles(user) & set(roles)):
                 return jsonify(error="Your role does not have access to this action."), 403
             g.user = user
             return view(*args, **kwargs)

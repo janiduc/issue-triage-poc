@@ -11,12 +11,15 @@ from . import config
 from .providers import ProviderError, send
 from .validation import ValidationError, validate_llm_output
 
-SYSTEM_PROMPT = f"""You are a software issue triage assistant helping a QA lead.
+def system_prompt(modules=None):
+    """The classification prompt, listing the project's own modules."""
+    modules = modules or config.MODULES
+    return f"""You are a software issue triage assistant helping a QA lead.
 Classify the issue and, where possible, recommend a resolution based on past resolved issues.
 
 Respond with ONLY one JSON object and no other text, using exactly these keys:
 {{"type": one of {config.ISSUE_TYPES},
- "module": one of {config.MODULES},
+ "module": one of {modules},
  "priority": one of {config.PRIORITIES},
  "confidence": number from 0 to 1 (your confidence in type and priority),
  "justification": one or two sentences explaining the priority,
@@ -38,13 +41,18 @@ Rules:
 - If the issue is too vague to classify reliably, give a low confidence (below 0.5).
 """
 
-# The answer's shape, used by providers that can constrain output (Ollama structured outputs).
-# Small local models otherwise invent keys, wrap the object, or put a module name in "type".
-OUTPUT_SCHEMA = {
+
+SYSTEM_PROMPT = system_prompt()
+
+
+def output_schema(modules=None):
+    """The answer's shape, used by providers that can constrain output (Ollama structured outputs).
+    Small local models otherwise invent keys, wrap the object, or put a module name in "type"."""
+    return {
     "type": "object",
     "properties": {
         "type": {"type": "string", "enum": config.ISSUE_TYPES},
-        "module": {"type": "string", "enum": config.MODULES},
+        "module": {"type": "string", "enum": modules or config.MODULES},
         "priority": {"type": "string", "enum": config.PRIORITIES},
         "confidence": {"type": "number"},
         "justification": {"type": "string"},
@@ -54,7 +62,10 @@ OUTPUT_SCHEMA = {
     },
     "required": ["type", "module", "priority", "confidence", "justification", "duplicate_of",
                  "recommendation", "recommendation_sources"],
-}
+    }
+
+
+OUTPUT_SCHEMA = output_schema()
 
 _TAG_RE = re.compile(r"</?\s*(issue|title|description|past_issues|past_issue)\b[^>]*>", re.I)
 
@@ -87,18 +98,18 @@ def _extract_json(text):
     return json.loads(text[start:end + 1])
 
 
-def call_model(user_message):
+def call_model(user_message, modules=None):
     """Single model call. Returns (text, usage). Separated out so tests can mock it."""
     try:
-        body = send(SYSTEM_PROMPT, [{"role": "user", "content": user_message}],
-                    max_tokens=600, json_mode=OUTPUT_SCHEMA)
+        body = send(system_prompt(modules), [{"role": "user", "content": user_message}],
+                    max_tokens=600, json_mode=output_schema(modules))
     except ProviderError as exc:
         raise LLMError(str(exc))
     text = "".join(b.get("text", "") for b in body.get("content", []) if b.get("type") == "text")
     return text, body.get("usage", {})
 
 
-def triage_with_llm(title, description, similar):
+def triage_with_llm(title, description, similar, modules=None):
     """Returns (validated_result, usage_dict). Raises LLMError on any failure."""
     user_message = build_user_message(title, description, similar)
     allowed_ids = [s["id"] for s in similar]
@@ -106,11 +117,11 @@ def triage_with_llm(title, description, similar):
     last_error = None
     started = time.perf_counter()
     for _attempt in range(2):  # one retry if the output is malformed
-        text, usage = call_model(user_message)
+        text, usage = call_model(user_message, modules)
         usage_total["input_tokens"] += usage.get("input_tokens", 0)
         usage_total["output_tokens"] += usage.get("output_tokens", 0)
         try:
-            result = validate_llm_output(_extract_json(text), allowed_ids)
+            result = validate_llm_output(_extract_json(text), allowed_ids, modules)
             usage_total["latency_ms"] = int((time.perf_counter() - started) * 1000)
             return result, usage_total
         except (json.JSONDecodeError, ValidationError) as exc:

@@ -78,6 +78,34 @@ evidence for evaluating the agent (LO4). It reports agreement twice, because the
 revise the classification: once against the first-pass classifier, and once against the plan
 the lead approved.
 
+## Projects: one desk, several repositories
+
+Each **project** is one repository (GitHub, Jira or the simulated tracker) with its own
+connection, team, modules and knowledge. The administrator manages them under **Projects**:
+
+- create a project: name, short name (used in URLs), tracker, repository, the *names* of the
+  environment variables that hold its token and webhook secret, and its modules;
+- **Test connection**: checks the token and lists members GitHub cannot assign, without ever
+  showing the token;
+- add members as triage lead, developer or reporter, set a developer's modules for that project,
+  change a role, or **remove** someone from the project (only that membership; the last triage
+  lead is protected, and a developer's open issues can be sent back to the lead's queue first);
+- archive a project to stop its imports and write-back while keeping its history.
+
+Roles are per project: someone can lead one repository and develop in another. Every permission
+is checked against the role in the issue's own project, and an issue outside a user's projects
+answers "not found". A removal takes effect on the user's next request. People pick the project in
+the header; the administrator can also choose **All projects** for insights and the activity log.
+
+The AI is shared but its knowledge is not: each project has its own similarity index, backup
+classifier and module list, so a fix in one project is never suggested in another. A new project
+can opt in to the generic seeded fixes.
+
+The first project is created from `.env` (`TRACKER`, `GITHUB_REPO`, ...) and follows it until an
+administrator edits its connection. For more repositories, add one token per project to `.env`
+under any name (for example `GITHUB_TOKEN_BOOKING=...`) and enter that name on the project.
+Each project's webhook URL is `https://<your-server>/api/webhooks/<short name>`.
+
 ## User roles
 
 | Feature | Reporter | Triage lead | Developer | Admin |
@@ -160,7 +188,9 @@ pipeline can be demonstrated offline.
 5. Priorities map to Jira's default scheme (critical → Highest … low → Low); edit
    `PRIORITY_MAP` in `triage/integrations/jira.py` for custom schemes.
 
-Webhooks need a public URL. For a local demo, use "Import now" or set `SYNC_INTERVAL_SECONDS`.
+Webhooks need a public URL. For a local demo, use "Import now" or set `SYNC_INTERVAL_SECONDS`
+(the poller syncs every active project). The settings above define the first project; add more
+under Projects.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -197,7 +227,7 @@ schedule. `.github/workflows/ci.yml` lints the code and runs the tests on every 
 ## Tests and evaluation
 
 ```bash
-python -m unittest -v      # 54 tests; AI model, Ollama, GitHub and Jira are all mocked
+python -m unittest -v      # 78 tests; AI model, Ollama, GitHub and Jira are all mocked
 python evaluate.py         # LLM vs baseline classifier: accuracy, macro-F1, confusion matrices,
                            # duplicates, prompt injection, tokens, cost
 python evaluate_agent.py   # the agent's plans: next step, labels, assignee, corrections, steps
@@ -216,6 +246,7 @@ vague, or prompt injection, and results are reported per case.
 | Fixes (FX1–4) | Classifier and plan agreement reported separately; lockout expires; bad input returns 400; assigning sends an assign reply, not a request for details |
 | Agent (AG1–5) | Tool-use plan, constraints on assignee and citations, step limit fallback, rules plan for vague issues, approval metrics |
 | Hardening (HD1–5) | Production refuses a weak signing key; no demo accounts and a secure cookie in production; first admin needs a password; more secret formats redacted |
+| Projects (PJ1–8, PM1–5, PA1–5, PI1–5, PL8) | Migration and per-project ids; one connection, sync and webhook secret per project; admin project screens and member removal safeguards; access by role in each project, revoked at once; knowledge, classifier and modules isolated per project; activity log per project |
 | Providers (PR1–5) | Ollama needs no key; classification and the agent's tool loop translated to and from Ollama; Ollama down falls back; missing model explained |
 | Ranking (RK1) | Ownership and history rank first; workload lowers score |
 | Pipeline (PL1–7) | Idempotent import, write-back, reporter reply round trip, closing, knowledge-base import, outbox retry after tracker outage, stale labels replaced |
@@ -251,6 +282,9 @@ vague, or prompt injection, and results are reported per case.
   responses only.
 
 ## Known limitations
+
+- Roles and modules edited under **Users and roles** apply to the first project; use **Projects**
+  for the others.
 
 - The agent's confidence is self-reported and not calibrated.
 - Ranking weights are hand-set; they should be tuned with the team.

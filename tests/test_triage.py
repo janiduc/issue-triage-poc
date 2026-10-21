@@ -72,7 +72,7 @@ class TriageWorkflowTests(Base):
     def test_tc2_duplicate_gets_grounded_recommendation(self):
         captured = {}
 
-        def fake(msg):
+        def fake(msg, modules=None):
             captured["msg"] = msg
             return llm_reply(priority="critical", duplicate_of=2,
                              recommendation="Check coupon expiry null handling.",
@@ -115,7 +115,7 @@ class TriageWorkflowTests(Base):
     def test_tc6_redaction_and_prompt_injection_fencing(self):
         captured = {}
 
-        def fake(msg):
+        def fake(msg, modules=None):
             captured["msg"] = msg
             return llm_reply()
         client = self.as_user("client.acme")

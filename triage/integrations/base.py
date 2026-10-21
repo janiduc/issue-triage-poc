@@ -63,6 +63,10 @@ class TrackerConnector:
     def close_issue(self, external_id, comment):
         raise SyncError("No tracker configured")
 
+    def check(self):
+        """Test the connection. Returns {"ok", "message", "assignable": [logins]}."""
+        return {"ok": False, "message": "No tracker configured for this project.", "assignable": []}
+
     def account_for(self, user_row):
         """The tracker account of a desk user, or None if not mapped."""
         return None
@@ -85,11 +89,11 @@ def stale_labels(current, new):
     return [l for l in current if l.startswith(MANAGED_PREFIXES) and l not in new]
 
 
-def all_managed_labels():
+def all_managed_labels(modules=None):
     """Every type-/module-/priority- label the desk can write (see agent.base_labels)."""
     from .. import config
     return ({f"type-{t}".replace("_", "-") for t in config.ISSUE_TYPES}
-            | {f"module-{m}".replace("_", "-") for m in config.MODULES}
+            | {f"module-{m}".replace("_", "-") for m in (modules or config.MODULES)}
             | {f"priority-{p}" for p in config.PRIORITIES})
 
 

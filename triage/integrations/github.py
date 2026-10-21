@@ -4,7 +4,7 @@ Token permissions needed on the repository: Issues (read and write), Metadata (r
 """
 from urllib.parse import quote
 
-from .base import ExternalIssue, Reply, TrackerConnector, is_ours, stale_labels, with_marker
+from .base import ExternalIssue, Reply, SyncError, TrackerConnector, is_ours, stale_labels, with_marker
 from .http import call, valid_signature
 
 API = "https://api.github.com"
@@ -90,6 +90,17 @@ class GitHubConnector(TrackerConnector):
     def close_issue(self, external_id, comment):
         self.post_comment(external_id, comment)
         self._req("PATCH", f"/issues/{external_id}", json={"state": "closed", "state_reason": "completed"})
+
+    def check(self):
+        if not self.configured():
+            return {"ok": False, "assignable": [],
+                    "message": "Token or repository missing: check the token's environment variable."}
+        try:
+            self._req("GET", "")
+            assignable = [a["login"] for a in self._paged("/assignees")]
+        except SyncError as exc:
+            return {"ok": False, "message": str(exc), "assignable": []}
+        return {"ok": True, "message": f"Connected to {self.repo}.", "assignable": assignable}
 
     def account_for(self, user_row):
         return user_row["github_login"] if user_row else None
