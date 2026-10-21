@@ -56,6 +56,34 @@ def ollama_url() -> str:
     return os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
 
 
+def default_project_settings() -> dict:
+    """The first project, built from today's single-tracker settings in .env.
+
+    Projects store the NAMES of the environment variables that hold their secrets, never the
+    secrets themselves, so "secrets live in the environment only" still holds.
+    """
+    tracker = os.getenv("TRACKER", "simulated").lower()
+    if tracker == "github":
+        repo = os.getenv("GITHUB_REPO") or ""
+        name = repo.split("/")[-1] or "github"
+        return {"slug": slugify(name), "name": repo or "GitHub project", "tracker": "github",
+                "repo": repo, "token_env": "GITHUB_TOKEN", "secret_env": "GITHUB_WEBHOOK_SECRET"}
+    if tracker == "jira":
+        key = os.getenv("JIRA_PROJECT") or "jira"
+        return {"slug": slugify(key), "name": f"Jira {key}", "tracker": "jira", "repo": key,
+                "base_url": os.getenv("JIRA_BASE_URL"), "token_env": "JIRA_API_TOKEN",
+                "email_env": "JIRA_EMAIL", "secret_env": "JIRA_WEBHOOK_SECRET"}
+    if tracker == "simulated":
+        return {"slug": "simulated", "name": "Simulated tracker", "tracker": "simulated"}
+    return {"slug": "default", "name": "Default project", "tracker": "none"}
+
+
+def slugify(text) -> str:
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+    return slug[:40] or "project"
+
+
 def use_embeddings() -> bool:
     return os.getenv("USE_EMBEDDINGS", "true").lower() == "true"
 
