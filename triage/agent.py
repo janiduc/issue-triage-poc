@@ -41,6 +41,8 @@ Rules:
   error, who is affected). Then write a specific question_for_reporter.
 - comment_for_reporter is sent to the reporter, possibly on a public tracker. Be brief and polite.
   Do not mention developers' names, other customers, internal issue numbers, or promise dates.
+  With action "assign" it only acknowledges the report; it never asks the reporter for anything.
+  Questions belong in question_for_reporter, with action "request_info".
 - Only cite past issue ids that your tools returned.
 - Optional extra labels, only if clearly justified: {sorted(EXTRA_LABELS)}.
 """
@@ -194,9 +196,11 @@ class TriageAgent:
             reason = "; ".join(candidates[0]["reasons"]) if candidates else ""
         action = args.get("action") if args.get("action") in ("assign", "request_info") else "assign"
         question = (str(args.get("question_for_reporter") or "").strip()[:800]) or None
+        switched = False
         if action == "request_info" and not question:
-            action = "assign"
-            notes.append("Agent asked for information without a question; switched to assign.")
+            action, switched = "assign", True
+            notes.append("Agent asked for information without a question; switched to assign "
+                         "and used the standard reply.")
         raw_dup = args.get("duplicate_of")
         dup = _as_id(raw_dup[0] if isinstance(raw_dup, list) and raw_dup else raw_dup)
         if raw_dup not in (None, [], "") and dup is None:
@@ -214,6 +218,8 @@ class TriageAgent:
         names = {c["id"]: c["name"] for c in candidates}
         comment = (str(args.get("comment_for_reporter") or "").strip()[:1500]
                    or default_comment(action, question))
+        if switched:  # the agent's reply was written for asking, not for assigning
+            comment = default_comment("assign")
         plan = {"classification": cls, "action": action, "assignee_id": assignee_id,
                 "assignee_name": names.get(assignee_id), "assignee_reason": reason,
                 "question_for_reporter": question,
