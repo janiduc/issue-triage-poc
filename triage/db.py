@@ -200,7 +200,8 @@ def migrate_projects(conn):
     conn.execute("DROP INDEX IF EXISTS ux_external")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_project_external "
                  "ON issues(project_id, source, external_id) WHERE external_id IS NOT NULL")
-    if conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
+    first_run = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+    if first_run:
         p = config.default_project_settings()
         conn.execute(
             "INSERT INTO projects (slug, name, tracker, repo, base_url, token_env, email_env, "
@@ -217,9 +218,10 @@ def migrate_projects(conn):
         conn.execute(f"UPDATE {table} SET project_id = ? WHERE project_id IS NULL", (default,))
     conn.execute("UPDATE audit_log SET project_id = (SELECT project_id FROM issues WHERE id = audit_log.issue_id) "
                  "WHERE project_id IS NULL AND issue_id IS NOT NULL")
-    conn.execute(
-        "INSERT OR IGNORE INTO project_members (project_id, user_id, role, modules, added_at) "
-        "SELECT ?, id, role, modules, ? FROM users WHERE role != 'admin'", (default, now()))
+    if first_run:  # only when projects are introduced: later removals must survive a restart
+        conn.execute(
+            "INSERT OR IGNORE INTO project_members (project_id, user_id, role, modules, added_at) "
+            "SELECT ?, id, role, modules, ? FROM users WHERE role != 'admin'", (default, now()))
 
 
 def _setting(conn, key):
@@ -381,6 +383,20 @@ def project_counts(project_id):
         members = conn.execute("SELECT COUNT(*) FROM project_members WHERE project_id = ?",
                                (project_id,)).fetchone()[0]
     return {"by_status": {r["status"]: r["n"] for r in rows}, "members": members}
+
+
+def assignment_counts(project_id):
+    """{user_id: {"open", "resolved"}}: how many of the project's issues each person holds or
+    fixed. Numbers only, so administrators can see workload without seeing issue content."""
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT u.id,
+                      (SELECT COUNT(*) FROM issues i WHERE i.project_id = ? AND i.assignee_id = u.id
+                       AND i.status = 'assigned') AS open,
+                      (SELECT COUNT(*) FROM issues i WHERE i.project_id = ? AND i.resolved_by = u.id
+                       AND i.status = 'resolved' AND i.is_seed = 0) AS resolved
+               FROM users u""", (project_id, project_id)).fetchall()
+    return {r["id"]: {"open": r["open"], "resolved": r["resolved"]} for r in rows}
 
 
 def open_assignments(project_id, user_id):

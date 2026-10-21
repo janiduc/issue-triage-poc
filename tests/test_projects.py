@@ -2,6 +2,7 @@
 import os
 import sqlite3
 
+from app import create_app
 from tests.test_triage import Base, llm_reply
 from triage import db
 
@@ -451,3 +452,32 @@ class ProjectLogTests(Base):
         self.assertIn("issue_submitted", first)
         self.assertNotIn("project_created", first)
         self.assertEqual(admin.get("/api/admin/audit?project=nope").status_code, 404)
+
+
+class TeamOverviewTests(Base):
+    # TO1: per-project roles and assignment counts, without issue content, for the admin only
+    def test_to1_team_overview(self):
+        admin = self.as_user("admin")
+        admin.post("/api/admin/projects", json={"slug": "booking", "name": "Booking API", "tracker": "none"})
+        lead = self.as_user("lead")
+        issue = self.submit(lead, "Refund missing", "A refund did not appear in the customer account.").get_json()
+        dev = db.get_user_by_username("dev.payments")["id"]
+        lead.post(f"/api/issues/{issue['id']}/triage", json={"action": "accept", "assignee_id": dev})
+        data = admin.get("/api/admin/overview").get_json()
+        first, booking = data
+        self.assertEqual(first["roles"], {"triage_lead": 1, "developer": 3, "reporter": 2})
+        payments = next(m for m in first["members"] if m["username"] == "dev.payments")
+        self.assertEqual((payments["open"], payments["resolved"]), (1, 0))
+        self.assertEqual(first["assigned_open"], 1)
+        self.assertEqual(booking["roles"], {"triage_lead": 0, "developer": 0, "reporter": 0})
+        self.assertNotIn("Refund missing", str(data))                   # counts only
+        self.assertEqual(len(admin.get("/api/admin/overview?project=booking").get_json()), 1)
+        self.assertEqual(lead.get("/api/admin/overview").status_code, 403)
+
+    # TO2: removing someone from the first project survives a restart (the migration runs again)
+    def test_to2_removal_survives_restart(self):
+        admin = self.as_user("admin")
+        tester = db.get_user_by_username("tester")["id"]
+        admin.delete(f"/api/admin/projects/simulated/members/{tester}")
+        create_app()                                                  # start-up runs the migration
+        self.assertNotIn(db.default_project_id(), db.memberships(tester))

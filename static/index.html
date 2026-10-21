@@ -175,7 +175,7 @@ const VIEWS = {
   reporter:    [["report", "Report an issue"], ["mine", "My issues"]],
   triage_lead: [["queue", "Triage queue"], ["insights", "Insights"], ["tracker", "Tracker"], ["report", "Report an issue"]],
   developer:   [["assigned", "My assignments"], ["report", "Report an issue"], ["mine", "Issues I reported"]],
-  admin:       [["projects", "Projects"], ["users", "Users and roles"], ["settings", "AI settings"], ["tracker", "Tracker"], ["audit", "Activity log"], ["insights", "Insights"]],
+  admin:       [["projects", "Projects"], ["team", "Team overview"], ["users", "Users and roles"], ["settings", "AI settings"], ["tracker", "Tracker"], ["audit", "Activity log"], ["insights", "Insights"]],
 };
 
 const state = { user: null, options: null, view: null, status: "new", selected: null, project: null };
@@ -251,7 +251,7 @@ function go(view) {
     ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"));
   ({report: viewReport, mine: () => viewList("mine"), assigned: () => viewList("assigned"),
     queue: () => viewList("all"), insights: viewInsights, users: viewUsers,
-    settings: viewSettings, audit: viewAudit, tracker: viewTracker, projects: viewProjects})[view]();
+    settings: viewSettings, audit: viewAudit, tracker: viewTracker, projects: viewProjects, team: viewTeam})[view]();
 }
 
 /* ---------- report an issue (reporter, developer, lead) ---------- */
@@ -771,6 +771,40 @@ async function viewProjects() {
             });
   };
   loadList().catch((e) => msg($("#pn-msg"), "error", e.message));
+}
+
+/* ---------- team overview (admin): roles and assignments per project, counts only ---------- */
+
+async function viewTeam() {
+  $("#view").innerHTML = `<section><h2>Team overview</h2>
+    <p class="hint">Who holds which role in ${state.project ? "the selected project" : "each project"}, and how many issues each person has open or has resolved there. Counts only; issue content stays hidden.</p>
+    <div id="team"></div></section>`;
+  try {
+    const projects = await api(withProject("/api/admin/overview"));
+    const order = {triage_lead: 0, developer: 1, reporter: 2};
+    $("#team").innerHTML = projects.map((p) => {
+      const members = [...p.members].sort((a, b) => order[a.role] - order[b.role] || b.open - a.open);
+      const rows = members.map((m) => `<tr>
+        <td><b>${esc(m.display_name)}</b><div class="hint">${esc(m.username)}${m.active ? "" : " · deactivated"}</div></td>
+        <td>${PROJECT_ROLE_LABELS[m.role]}</td>
+        <td>${m.role === "developer" ? (m.modules.length ? m.modules.map(nice).map(esc).join(", ") : '<span class="hint">none</span>') : '<span class="hint">–</span>'}</td>
+        <td>${m.github_login ? esc(m.github_login) : '<span class="hint">not mapped</span>'}</td>
+        <td class="score">${m.role === "developer" || m.open ? m.open : "–"}</td>
+        <td class="score">${m.role === "developer" || m.resolved ? m.resolved : "–"}</td></tr>`).join("");
+      return `<h3>${esc(p.name)} ${p.active ? "" : '<span class="ext">archived</span>'}</h3>
+        <p class="hint">${esc(TRACKER_NAMES[p.tracker])}${p.repo ? " · " + esc(p.repo) : ""}</p>
+        <div class="stats">
+          <div class="stat"><div class="n">${p.roles.triage_lead}</div><div class="hint">triage leads</div></div>
+          <div class="stat"><div class="n">${p.roles.developer}</div><div class="hint">developers</div></div>
+          <div class="stat"><div class="n">${p.roles.reporter}</div><div class="hint">reporters</div></div>
+          <div class="stat"><div class="n">${p.assigned_open}</div><div class="hint">issues with developers</div></div>
+          <div class="stat"><div class="n">${p.unassigned_open}</div><div class="hint">not yet assigned</div></div>
+          <div class="stat"><div class="n">${p.resolved}</div><div class="hint">resolved</div></div></div>
+        ${p.roles.triage_lead ? "" : '<p class="error">No triage lead: nobody can approve this project\'s issues.</p>'}
+        <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Member</th><th>Role</th><th>Modules owned</th><th>GitHub login</th><th>Open assigned</th><th>Resolved</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="6" class="empty">No members yet.</td></tr>'}</tbody></table></div>`;
+    }).join("");
+  } catch (err) { $("#team").innerHTML = `<p class="error">${esc(err.message)}</p>`; }
 }
 
 async function viewSettings() {

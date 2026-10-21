@@ -693,6 +693,32 @@ def create_app():
         db.audit(g.user["id"], "project_tested", detail={"project": slug, "ok": result["ok"]})
         return jsonify(result)
 
+    @app.get("/api/admin/overview")
+    @require_roles("admin")
+    def admin_overview():
+        """Per project: who holds which role, and each person's open and resolved assignments.
+        Counts only; no issue content."""
+        slug = request.args.get("project")
+        projects = [project_or_404(slug)] if slug else db.list_projects()
+        out = []
+        for project in projects:
+            members = db.project_members(project["id"])
+            counts = db.assignment_counts(project["id"])
+            by_status = db.project_counts(project["id"])["by_status"]
+            people = [{"user_id": m["id"], "display_name": m["display_name"], "username": m["username"],
+                       "role": m["project_role"], "modules": m["project_modules"],
+                       "github_login": m.get("github_login"), "active": m["active"],
+                       **counts.get(m["id"], {"open": 0, "resolved": 0})} for m in members]
+            # People who still hold issues here but are no longer members (should be none)
+            orphans = [uid for uid, c in counts.items() if c["open"] and uid not in {m["id"] for m in members}]
+            out.append({"slug": project["slug"], "name": project["name"], "tracker": project["tracker"],
+                        "repo": project["repo"], "active": project["active"],
+                        "roles": {r: sum(p["role"] == r for p in people) for r in PROJECT_ROLES},
+                        "members": people, "unassigned_open": by_status.get("new", 0)
+                        + by_status.get("needs_info", 0), "assigned_open": by_status.get("assigned", 0),
+                        "resolved": by_status.get("resolved", 0), "orphan_assignees": len(orphans)})
+        return jsonify(out)
+
     @app.get("/api/admin/projects/<slug>/members")
     @require_roles("admin")
     def admin_project_members(slug):
