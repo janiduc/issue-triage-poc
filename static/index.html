@@ -161,9 +161,11 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":
 const pct = (v) => v == null ? "–" : Math.round(v * 100) + "%";
 const when = (iso) => iso ? new Date(iso).toLocaleString() : "";
 
+// Every seeded demo account (triage/db.py DEMO_USERS), one line per account.
 const DEMO = [["client.acme", "Reporter (external client)"], ["tester", "Reporter (internal tester)"],
   ["lead", "Triage lead"], ["dev.payments", "Developer, payments and reporting"],
-  ["dev.platform", "Developer, platform and API"], ["admin", "Administrator"]];
+  ["dev.platform", "Developer, platform and API"], ["dev.frontend", "Developer, front end"],
+  ["admin", "Administrator"]];
 
 // Which screens each role gets. The server enforces the same rules; this only shapes the UI.
 const VIEWS = {
