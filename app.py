@@ -191,6 +191,17 @@ def create_app():
     def index():
         return send_from_directory(app.static_folder, "index.html")
 
+    def me_payload(user):
+        """The signed-in user with their projects and the role in each (what the screens are built from)."""
+        if user["role"] == "admin":
+            projects = [{"slug": p["slug"], "name": p["name"], "role": "admin"}
+                        for p in db.list_projects(active_only=True)]
+        else:
+            memberships = db.memberships(user["id"])
+            projects = [{"slug": p["slug"], "name": p["name"], "role": memberships[p["id"]]["role"]}
+                        for p in db.list_projects(active_only=True) if p["id"] in memberships]
+        return {k: v for k, v in user.items() if k != "projects"} | {"projects": projects}
+
     @app.get("/api/public-config")
     def public_config():
         """What the sign-in page may show before anyone signs in."""
@@ -209,7 +220,7 @@ def create_app():
         session.clear()
         session["user_id"] = user["id"]
         db.audit(user["id"], "login")
-        return jsonify(user)
+        return jsonify(me_payload(user))  # same shape as /api/me, so the first screen is right
 
     @app.post("/api/logout")
     def logout():
@@ -222,13 +233,7 @@ def create_app():
     @app.get("/api/me")
     @require_roles()
     def me():
-        if g.user["role"] == "admin":
-            projects = [{"slug": p["slug"], "name": p["name"], "role": "admin"}
-                        for p in db.list_projects(active_only=True)]
-        else:
-            projects = [{"slug": p["slug"], "name": p["name"], "role": g.user["projects"][p["id"]]["role"]}
-                        for p in db.list_projects(active_only=True) if p["id"] in g.user["projects"]]
-        return jsonify({k: v for k, v in g.user.items() if k != "projects"} | {"projects": projects})
+        return jsonify(me_payload(g.user))
 
     @app.get("/api/options")
     @require_roles()
@@ -949,4 +954,4 @@ if __name__ == "__main__":
     interval = int(os.getenv("SYNC_INTERVAL_SECONDS", "0"))
     if interval > 0:
         start_background_sync(application, interval)
-    application.run(debug=False, port=int(os.getenv("PORT", "5003")))
+    application.run(debug=False, port=int(os.getenv("PORT", "5000")))

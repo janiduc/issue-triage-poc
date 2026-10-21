@@ -3,6 +3,7 @@ import os
 import sqlite3
 
 from app import create_app
+from triage.db import DEMO_PASSWORD
 from tests.test_triage import Base, llm_reply
 from triage import db
 
@@ -623,3 +624,9 @@ class RoleVisibilityTests(Base):
         accounts = {a["username"]: a for a in self.app.test_client().get("/api/public-config").get_json()["accounts"]}
         self.assertEqual(len(accounts["dev.platform"]["projects"]), 2)
         self.assertTrue(accounts["admin"]["admin"])
+
+    # RS2: signing in returns the projects and roles, so the first screen matches the role
+    def test_rs2_login_returns_project_roles(self):
+        res = self.app.test_client().post("/api/login", json={"username": "lead", "password": DEMO_PASSWORD})
+        self.assertEqual(res.get_json()["projects"], [{"slug": "simulated", "name": "Simulated tracker",
+                                                       "role": "triage_lead"}])
