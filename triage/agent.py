@@ -105,6 +105,7 @@ def base_labels(classification):
 class TriageAgent:
     def __init__(self, service):
         self.service = service  # gives access to the similarity index
+        self._project_id = None
 
     # ----- tools (read-only) -----
 
@@ -128,7 +129,7 @@ class TriageAgent:
                 return {"error": f"Unknown module. Use one of {config.MODULES}."}
             raw = args.get("similar_issue_ids") or []
             ids = [i for i in map(_as_id, raw if isinstance(raw, list) else [raw]) if i in seen_ids]
-            shortlist = assignment.rank_developers(module, ids)
+            shortlist = assignment.rank_developers(module, ids, project_id=self._project_id)
             shortlists[module] = shortlist
             return shortlist
         return {"error": f"Unknown tool {name}"}
@@ -136,6 +137,7 @@ class TriageAgent:
     # ----- main loop -----
 
     def plan(self, issue):
+        self._project_id = issue.get("project_id")
         started = time.perf_counter()
         seen_ids, shortlists, trace = set(), {}, []
         usage = {"input_tokens": 0, "output_tokens": 0}
@@ -186,7 +188,7 @@ class TriageAgent:
                 value = fallback
             cls[field] = value
         candidates = shortlists.get(cls["module"]) or assignment.rank_developers(
-            cls["module"], [i for i in seen_ids])
+            cls["module"], [i for i in seen_ids], project_id=issue.get("project_id"))
         allowed_ids = {c["id"] for c in candidates}
         assignee_id, reason = _as_id(args.get("assignee_id")), str(args.get("assignee_reason") or "")[:300]
         if assignee_id not in allowed_ids:
@@ -262,7 +264,8 @@ def rules_plan(issue, index, threshold):
     """Deterministic plan used when the agent is unavailable. Same shape as an agent plan."""
     cls = {"type": issue["ai_type"], "module": issue["ai_module"], "priority": issue["ai_priority"]}
     similar = json.loads(issue.get("similar_json") or "[]")
-    candidates = assignment.rank_developers(cls["module"], [s["id"] for s in similar])
+    candidates = assignment.rank_developers(cls["module"], [s["id"] for s in similar],
+                                            project_id=issue.get("project_id"))
     top = candidates[0] if candidates else None
     vague = (len(issue["description"].split()) < config.MIN_DESCRIPTION_WORDS
              or (issue["ai_confidence"] or 0) < threshold)

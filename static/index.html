@@ -148,7 +148,9 @@
   <header>
     <h1>Issue triage desk</h1>
     <nav id="nav" aria-label="Main"></nav>
-    <div class="who"><span><b id="who-name"></b></span><span class="role-badge" id="who-role"></span>
+    <div class="who"><label for="proj-switch" class="hint" id="proj-label" style="margin:0" hidden>Project</label>
+      <select id="proj-switch" hidden style="width:auto"></select>
+      <span><b id="who-name"></b></span><span class="role-badge" id="who-role"></span>
       <button class="secondary" id="logout">Sign out</button></div>
   </header>
   <main id="view"></main>
@@ -176,7 +178,14 @@ const VIEWS = {
   admin:       [["projects", "Projects"], ["users", "Users and roles"], ["settings", "AI settings"], ["tracker", "Tracker"], ["audit", "Activity log"], ["insights", "Insights"]],
 };
 
-const state = { user: null, options: null, view: null, status: "new", selected: null };
+const state = { user: null, options: null, view: null, status: "new", selected: null, project: null };
+
+// The selected project decides the role (and so the screens) for everyone but the administrator.
+const currentProject = () => (state.user.projects || []).find((p) => p.slug === state.project) || null;
+const roleNow = () => state.user.role === "admin" ? "admin" : (currentProject() ? currentProject().role : "reporter");
+const withProject = (path) => state.project ? path + (path.includes("?") ? "&" : "?") + "project=" + encodeURIComponent(state.project) : path;
+const remember = (slug) => { try { localStorage.setItem("triage-project", slug); } catch (e) { /* storage unavailable */ } };
+const recalled = () => { try { return localStorage.getItem("triage-project"); } catch (e) { return null; } };
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts});
@@ -204,8 +213,20 @@ async function startApp(user) {
   state.options = await api("/api/options");
   $("#login").hidden = true; $("#shell").hidden = false;
   $("#who-name").textContent = user.display_name;
-  $("#who-role").textContent = state.options.role_labels[user.role];
-  const views = VIEWS[user.role];
+  const projects = user.projects || [];
+  const saved = recalled();
+  state.project = (projects.find((p) => p.slug === saved) || projects[0] || {}).slug || null;
+  const sw = $("#proj-switch");
+  sw.innerHTML = projects.map((p) => `<option value="${esc(p.slug)}" ${p.slug === state.project ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+  sw.hidden = $("#proj-label").hidden = projects.length < 2;
+  sw.onchange = () => { state.project = sw.value; remember(sw.value); state.status = "new"; buildNav(); };
+  buildNav();
+}
+
+function buildNav() {
+  const role = roleNow();
+  $("#who-role").textContent = state.options.role_labels[role] + (currentProject() && state.user.role !== "admin" ? ` · ${currentProject().name}` : "");
+  const views = role === "reporter" && !currentProject() ? [["mine", "My issues"]] : VIEWS[role];
   $("#nav").innerHTML = views.map(([id, label]) => `<button data-view="${id}">${label}</button>`).join("");
   $$("#nav button").forEach((b) => b.onclick = () => go(b.dataset.view));
   go(views[0][0]);
@@ -252,11 +273,11 @@ function viewReport() {
     msg.className = ""; msg.textContent = "";
     btn.disabled = true; btn.textContent = "Submitting…";
     try {
-      const issue = await post("/api/issues", {title: $("#title").value, description: $("#description").value});
+      const issue = await post("/api/issues", {title: $("#title").value, description: $("#description").value, project: state.project});
       e.target.reset();
       msg.className = "success";
       msg.textContent = `Issue #${issue.id} submitted. You can follow its progress under ${
-        state.user.role === "triage_lead" ? "Triage queue" : state.user.role === "developer" ? "Issues I reported" : "My issues"}.`;
+        roleNow() === "triage_lead" ? "Triage queue" : roleNow() === "developer" ? "Issues I reported" : "My issues"}.`;
     } catch (err) { msg.className = "error"; msg.textContent = err.message; }
     finally { btn.disabled = false; btn.textContent = "Submit issue"; }
   };
@@ -273,7 +294,7 @@ const EMPTY = {
 
 async function viewList(scope) {
   const isQueue = scope === "all";
-  const title = {mine: state.view === "mine" && state.user.role === "developer" ? "Issues I reported" : "My issues",
+  const title = {mine: state.view === "mine" && roleNow() === "developer" ? "Issues I reported" : "My issues",
                  assigned: "My assignments", all: "Triage queue"}[scope];
   $("#view").innerHTML = `<div class="split">
     <section><h2>${title}</h2>
@@ -287,18 +308,18 @@ async function viewList(scope) {
     <section id="detail"><p class="empty">Select an issue to see its details.</p></section></div>`;
   if (isQueue) {
     $$(".tabs button").forEach((b) => b.onclick = () => { state.status = b.dataset.status; viewList(scope); });
-    api("/api/integration").then((t) => {
+    api(withProject("/api/integration")).then((t) => {
       if (!t.configured) return;
       $("#q-sync").hidden = false;
       $("#q-sync").innerHTML = `<button class="secondary" id="sync-now">Import from ${esc(t.label)}</button>
         <span class="hint" id="sync-msg">${t.last_sync ? "Last sync " + when(t.last_sync) : "Not synced yet"}${t.pending_writes ? ` · ${t.pending_writes} update(s) waiting to be sent` : ""}</span>`;
       $("#sync-now").onclick = () => runSync($("#sync-now"), $("#sync-msg"), () => viewList(scope));
     }).catch(() => {});
-    api("/api/metrics").then((m) => { $("#q-metrics").textContent =
+    api(withProject("/api/metrics")).then((m) => { $("#q-metrics").textContent =
       `${m.by_status.new} awaiting triage · ${m.reviewed} reviewed · first-pass priority kept ${pct(m.agreement.priority)} · backup classifier used ${pct(m.fallback_rate)}`; }).catch(() => {});
   }
   const params = new URLSearchParams({scope});
-  if (isQueue) params.set("status", state.status);
+  if (isQueue) { params.set("status", state.status); if (state.project) params.set("project", state.project); }
   try {
     const issues = await api(`/api/issues?${params}`);
     const key = isQueue ? (state.status === "assigned" ? "assigned_q" : state.status) : scope;
@@ -367,7 +388,7 @@ function trackerLine(i) {
 }
 
 function fullDetail(i) {
-  const s = i.suggestion, role = state.user.role;
+  const s = i.suggestion, role = i.my_role || roleNow();
   const p = i.final.priority || s.priority;
   const similar = i.similar_issues.length
     ? `<ul class="plain">${i.similar_issues.map((x) => `<li><b>#${x.id} ${esc(x.title)}</b>
@@ -391,7 +412,7 @@ function fullDetail(i) {
   }
 
   return `<h2>#${i.id} ${esc(i.title)}</h2>
-    <p class="hint">Reported by ${esc(i.reporter_name || "unknown")} · ${when(i.created_at)}
+    <p class="hint">${i.project ? esc(i.project.name) + " · " : ""}Reported by ${esc(i.reporter_name || "unknown")} · ${when(i.created_at)}
       ${i.assignee_name ? ` · Assigned to ${esc(i.assignee_name)}` : ""}
       ${i.triage_count > 1 ? ` · re-analysed after the reporter added details` : ""}</p>
     ${trackerLine(i)}
@@ -506,7 +527,7 @@ function wireDetail(i) {
   preview();
 
   const shortlist = new Set((i.plan.candidates || []).map((c) => c.id));
-  api("/api/developers").then((devs) => {
+  api(withProject("/api/developers")).then((devs) => {
     $("#other-dev").innerHTML += devs.filter((d) => !shortlist.has(d.id))
       .map((d) => `<option value="${d.id}">${esc(d.name)} (${d.open_count} open)</option>`).join("");
   }).catch(() => {});
@@ -529,7 +550,7 @@ function wireDetail(i) {
 async function runSync(btn, msgEl, after) {
   btn.disabled = true; const label = btn.textContent; btn.textContent = "Importing…";
   try {
-    const r = await post("/api/integration/sync", {});
+    const r = await post(withProject("/api/integration/sync"), {});
     msgEl.className = r.errors.length ? "error" : "success";
     msgEl.textContent = `${r.imported} new, ${r.replies} reporter repl${r.replies === 1 ? "y" : "ies"}, ${r.closed} closed in tracker, ${r.retried} update(s) re-sent` +
       (r.errors.length ? ` · Problems: ${r.errors.join("; ")}` : "");
@@ -543,7 +564,7 @@ async function runSync(btn, msgEl, after) {
 async function viewInsights() {
   $("#view").innerHTML = `<section><h2>Insights</h2><div id="ins"></div></section>`;
   try {
-    const m = await api("/api/metrics");
+    const m = await api(withProject("/api/metrics"));
     const stat = (n, label) => `<div class="stat"><div class="n">${n ?? "–"}</div><div class="hint">${label}</div></div>`;
     $("#ins").innerHTML = `<div class="stats">
       ${stat(m.total, "issues submitted")} ${stat(m.by_status.new, "awaiting triage")}
@@ -578,7 +599,7 @@ async function viewInsights() {
 async function viewUsers() {
   const o = state.options;
   $("#view").innerHTML = `<section><h2>Users and roles</h2>
-      <p class="hint">Developers are ranked for each issue by the modules they own, their open workload and who fixed similar issues. Map tracker accounts so assignments also appear in GitHub or Jira.</p>
+      <p class="hint">Role and modules here apply to the first project; use Projects to give people roles in other projects. Map tracker accounts so assignments also appear in GitHub or Jira.</p>
       <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Modules owned</th><th>Tracker accounts</th><th>Status</th><th></th></tr></thead>
       <tbody id="users"></tbody></table></div><div id="users-msg" role="alert"></div></section>
     <section class="narrow"><h2>Add a user</h2>
@@ -792,7 +813,7 @@ async function viewTracker() {
   $("#view").innerHTML = `<section><h2>Issue tracker</h2><div id="trk"></div></section>
     <section id="sim" hidden></section><section id="events" hidden></section>`;
   let t;
-  try { t = await api("/api/integration"); } catch (err) { $("#trk").innerHTML = `<p class="error">${esc(err.message)}</p>`; return; }
+  try { t = await api(withProject("/api/integration")); } catch (err) { $("#trk").innerHTML = `<p class="error">${esc(err.message)}</p>`; return; }
   $("#trk").innerHTML = t.configured ? `
       <p>Connected to <b>${esc(t.label)}</b>. ${t.last_sync ? `Last import ${when(t.last_sync)}.` : "Not imported yet."}
       ${t.pending_writes ? `<b>${t.pending_writes}</b> update(s) waiting to be sent.` : ""}</p>
@@ -815,7 +836,7 @@ async function loadSimulated() {
   const box = $("#sim");
   box.hidden = false;
   try {
-    const st = await api("/api/integration/simulated");
+    const st = await api(withProject("/api/integration/simulated"));
     box.innerHTML = `<h2>Simulated tracker</h2>
       <p class="hint">A stand-in for GitHub or Jira so the full pipeline can be shown offline. Use it to act as a reporter or as someone working directly in the tracker.</p>
       <ul class="plain">${st.issues.map((x) => `<li><b>${esc(x.key)}</b> ${esc(x.title)} <span class="status-pill ${x.state === "closed" ? "resolved" : ""}">${x.state}</span>
@@ -830,17 +851,17 @@ async function loadSimulated() {
       <label for="sim-rep">Reporter</label><input id="sim-rep" value="demo-client">
       <div class="row"><button id="sim-create">Create in tracker</button></div><div id="sim-msg" role="alert"></div>`;
     const msg = (cls, text) => { $("#sim-msg").className = cls; $("#sim-msg").textContent = text; };
-    $("#sim-create").onclick = () => post("/api/integration/simulated/issues",
+    $("#sim-create").onclick = () => post(withProject("/api/integration/simulated/issues"),
       {title: $("#sim-title").value, body: $("#sim-body").value, reporter: $("#sim-rep").value})
       .then((x) => { msg("success", `Created ${x.key}. Import it from the queue or with Import now.`); setTimeout(loadSimulated, 800); },
             (e) => msg("error", e.message));
     $$(".sim-reply").forEach((b) => b.onclick = () => {
       const text = prompt(`Reply on ${b.dataset.key} as the reporter:`);
-      if (text) post(`/api/integration/simulated/issues/${b.dataset.key}/reply`, {body: text}).then(loadSimulated, (e) => msg("error", e.message));
+      if (text) post(withProject(`/api/integration/simulated/issues/${b.dataset.key}/reply`), {body: text}).then(loadSimulated, (e) => msg("error", e.message));
     });
     $$(".sim-close").forEach((b) => b.onclick = () => {
       const text = prompt(`Closing comment for ${b.dataset.key} (how it was fixed):`);
-      if (text) post(`/api/integration/simulated/issues/${b.dataset.key}/close`, {body: text}).then(loadSimulated, (e) => msg("error", e.message));
+      if (text) post(withProject(`/api/integration/simulated/issues/${b.dataset.key}/close`), {body: text}).then(loadSimulated, (e) => msg("error", e.message));
     });
   } catch (err) { box.innerHTML = `<p class="error">${esc(err.message)}</p>`; }
 }

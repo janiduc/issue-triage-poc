@@ -46,11 +46,13 @@ class TriageService:
 
     # ----- public workflow -----
 
-    def triage_new(self, title, description, reporter_id, external=None):
+    def triage_new(self, title, description, reporter_id, external=None, project_id=None):
         title, n1 = redact(title)
         description, n2 = redact(description)
         ai = self._analyse(title, description)
         ai["redactions"] = n1 + n2
+        if external is None and project_id is not None:
+            external = {"source": "desk", "project_id": project_id}
         issue_id = db.insert_issue(title, description, reporter_id, ai, external)
         self.create_plan(issue_id)
         return issue_id

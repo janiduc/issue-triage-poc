@@ -149,19 +149,20 @@ class ProjectConnectionTests(Base):
         self.assertIsNotNone(db.find_external("github", "7", project_id=b))
         self.assertEqual(client.post("/api/webhooks/no-such-project", data=payload).status_code, 404)
 
-    # PJ8: a developer who is not a member of the project is not assigned in its tracker
-    def test_pj8_non_member_not_assigned_in_tracker(self):
+    # PJ8: only the project's own developers can be assigned, in the desk and in its tracker
+    def test_pj8_only_project_developers_are_assigned(self):
         lead = self.as_user("lead")
         self.sync(lead, "second")
         issue_id = db.find_external("simulated", "SIM-1", project_id=self.second)
         outsider = db.get_user_by_username("dev.frontend")["id"]
-        lead.post(f"/api/issues/{issue_id}/triage", json={"action": "accept", "assignee_id": outsider})
-        state = self.app.config["pipelines"].get(self.second).connector.state()
-        self.assertIsNone(next(i for i in state["issues"] if i["key"] == "SIM-1")["assignee"])
-        with db.connect() as conn:
-            detail = conn.execute("SELECT detail FROM sync_events WHERE issue_id = ? AND action = 'triage'",
-                                  (issue_id,)).fetchone()["detail"]
-        self.assertIn("not a member of this project", detail)
+        res = lead.post(f"/api/issues/{issue_id}/triage", json={"action": "accept", "assignee_id": outsider})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("developer of this project", res.get_json()["error"])
+        # the tracker write also refuses an assignee who is not a member
+        db.save_triage_decision(issue_id, "accept", "bug", "api", "low", outsider, None)
+        write = self.app.config["pipelines"].get(self.second).triage_write(db.get_issue(issue_id), [], None)
+        self.assertIsNone(write["assignee"])
+        self.assertIn("not a member of this project", write["warning"])
 
 
 class ProjectAdminTests(Base):
@@ -270,3 +271,93 @@ class ProjectAdminTests(Base):
         self.create()
         self.admin.patch("/api/admin/projects/booking", json={"active": False})
         self.assertFalse(db.get_project_by_slug("booking")["active"])
+
+
+class ProjectAccessTests(Base):
+    """Phase 4: every permission is the user's role in the issue's project."""
+
+    def setUp(self):
+        super().setUp()
+        self.admin = self.as_user("admin")
+        self.admin.post("/api/admin/projects", json={"slug": "booking", "name": "Booking API", "tracker": "none",
+                                                     "modules": ["bookings", "payments"]})
+        self.booking = db.get_project_by_slug("booking")["id"]
+        self.admin.post("/api/admin/users", json={"username": "lead.booking", "display_name": "Booking lead",
+                                                  "role": "reporter", "password": "longpassword"})
+        self.blead = db.get_user_by_username("lead.booking")["id"]
+        db.remove_membership(db.default_project_id(), self.blead)       # only in Booking
+        db.set_membership(self.booking, self.blead, "triage_lead")
+        db.set_membership(self.booking, db.get_user_by_username("dev.platform")["id"], "developer", ["bookings"])
+
+    def login(self, username, password="longpassword"):
+        client = self.app.test_client()
+        self.assertEqual(client.post("/api/login", json={"username": username, "password": password}).status_code, 200)
+        return client
+
+    def booking_issue(self, client, title="Double booking", text="Two guests got the same room for the same night."):
+        return self.submit_in(client, "booking", title, text)
+
+    def submit_in(self, client, slug, title, text):
+        from unittest import mock
+        from triage import llm
+        with mock.patch.object(llm, "call_model", return_value=llm_reply(module="api")):
+            return client.post("/api/issues", json={"title": title, "description": text, "project": slug})
+
+    # PA1: a lead of one project cannot see, list or triage another project's issues
+    def test_pa1_leads_are_confined_to_their_project(self):
+        blead = self.login("lead.booking")
+        issue = self.booking_issue(blead).get_json()
+        lead = self.as_user("lead")                                   # lead of the first project only
+        self.assertEqual(lead.get(f"/api/issues/{issue['id']}").status_code, 404)
+        self.assertEqual(lead.post(f"/api/issues/{issue['id']}/triage", json={"action": "accept"}).status_code, 404)
+        self.assertEqual(lead.get("/api/issues?scope=all&project=booking").status_code, 403)
+        queue = blead.get("/api/issues?scope=all&project=booking").get_json()
+        self.assertEqual([i["id"] for i in queue], [issue["id"]])
+        self.assertEqual(blead.get("/api/issues?scope=all&project=simulated").status_code, 403)
+
+    # PA2: one person, two roles: developer in Booking, lead nowhere else
+    def test_pa2_roles_differ_by_project(self):
+        blead = self.login("lead.booking")
+        issue = self.booking_issue(blead).get_json()
+        dev = db.get_user_by_username("dev.platform")["id"]
+        res = blead.post(f"/api/issues/{issue['id']}/triage", json={"action": "accept", "assignee_id": dev})
+        self.assertEqual(res.get_json()["status"], "assigned")
+        platform = self.as_user("dev.platform")
+        assigned = platform.get("/api/issues?scope=assigned").get_json()
+        self.assertEqual([(i["id"]) for i in assigned], [issue["id"]])
+        self.assertEqual(platform.get(f"/api/issues/{issue['id']}").get_json()["project"]["slug"], "booking")
+        self.assertEqual(platform.post(f"/api/issues/{issue['id']}/triage", json={"action": "accept"}).status_code, 403)
+        devs = blead.get("/api/developers?project=booking").get_json()
+        self.assertEqual([d["id"] for d in devs], [dev])
+
+    # PA3: removing someone from a project takes effect on their very next request
+    def test_pa3_removal_revokes_access_at_once(self):
+        blead = self.login("lead.booking")
+        issue = self.booking_issue(blead).get_json()
+        db.set_membership(self.booking, db.get_user_by_username("lead")["id"], "triage_lead")  # a second lead
+        self.assertEqual(blead.get(f"/api/issues/{issue['id']}").status_code, 200)
+        res = self.admin.delete(f"/api/admin/projects/booking/members/{self.blead}")
+        self.assertEqual(res.status_code, 200)
+        same_session = blead.get(f"/api/issues/{issue['id']}")
+        self.assertEqual(same_session.status_code, 200)                # still the reporter of it...
+        self.assertNotIn("plan", same_session.get_json())              # ...but read-only, no lead view
+        self.assertEqual(blead.get("/api/issues?scope=all&project=booking").status_code, 403)
+
+    # PA4: reporters report only into their own projects
+    def test_pa4_reporting_needs_membership(self):
+        acme = self.as_user("client.acme")                            # member of the first project only
+        self.assertEqual(self.submit_in(acme, "booking", "Room error", "Booking page shows an error.").status_code, 400)
+        res = self.submit_in(acme, "simulated", "Checkout error", "Checkout fails with an error today.")
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.get_json()["project"]["slug"], "simulated")
+        me = acme.get("/api/me").get_json()
+        self.assertEqual([p["slug"] for p in me["projects"]], ["simulated"])
+
+    # PA5: insights are per project for leads; the administrator can see one project or all
+    def test_pa5_metrics_per_project(self):
+        blead = self.login("lead.booking")
+        self.booking_issue(blead)
+        self.submit(self.as_user("lead"), "Checkout error", "Checkout fails with an error for everyone.")
+        self.assertEqual(blead.get("/api/metrics?project=booking").get_json()["total"], 1)
+        self.assertEqual(self.admin.get("/api/metrics").get_json()["total"], 2)
+        self.assertEqual(self.admin.get("/api/metrics?project=booking").get_json()["total"], 1)

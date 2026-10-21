@@ -18,10 +18,11 @@ import re
 import threading
 
 from flask import Flask, g, jsonify, request, send_from_directory, session
-from werkzeug.exceptions import HTTPException, NotFound
+from werkzeug.exceptions import Forbidden, HTTPException, NotFound
 
 from triage import config, db
-from triage.auth import authenticate, current_user, require_roles, reset_failed_logins
+from triage.auth import (authenticate, current_user, effective_roles, project_role, require_roles,
+                         reset_failed_logins)
 from triage.agent import EXTRA_LABELS
 from triage.integrations.base import SyncError
 from triage.pipeline import Pipelines
@@ -66,13 +67,15 @@ def proposed_assign_comment(plan):
 
 
 def view_role_for(issue, user):
-    """Which view of an issue this user may see: 'full', 'reporter', or None (no access)."""
-    role = user["role"]
+    """Which view of an issue this user may see: 'full', 'reporter', or None (no access).
+    It depends on the user's role in the issue's project; people always keep a read-only view
+    of issues they reported, even after leaving the project."""
+    role = project_role(user, issue["project_id"])
     if role == "triage_lead":
         return "full"
     if role == "developer" and issue["assignee_id"] == user["id"]:
         return "full"
-    if role in ("reporter", "developer") and issue["reporter_id"] == user["id"]:
+    if role != "admin" and issue["reporter_id"] == user["id"]:
         return "reporter"
     return None
 
@@ -93,15 +96,34 @@ def create_app():
     # "pipeline" = the first project's, kept for single-project callers and tests
     app.config.update(service=service, pipelines=pipelines, pipeline=pipelines.default())
 
-    def selected_pipeline():
-        """The project named by ?project=<slug> (or "project" in the body), else the first one."""
+    def scoped_project(*roles):
+        """The project named by ?project=<slug> (or "project" in the body), which the user must
+        hold one of `roles` in (administrators may use any). Without a name: the user's first
+        such project."""
         slug = request.args.get("project") or body().get("project")
-        if not slug:
-            return pipelines.default()
-        p = pipelines.by_slug(str(slug))
-        if not p:
-            raise ValidationError("Unknown project.")
-        return p
+        if slug:
+            project = db.get_project_by_slug(str(slug))
+            if not project:
+                raise NotFound("Project not found.")
+        else:
+            if g.user["role"] == "admin":
+                project = db.get_project(db.default_project_id())
+            else:
+                ids = [pid for pid, m in sorted(g.user["projects"].items()) if m["role"] in roles]
+                project = db.get_project(ids[0]) if ids else None
+            if not project:
+                raise Forbidden("You are not in a project with that role.")
+        if g.user["role"] != "admin" and project_role(g.user, project["id"]) not in roles:
+            raise Forbidden("Your role in this project does not allow that.")
+        return project
+
+    def selected_pipeline():
+        return pipelines.get(scoped_project("triage_lead")["id"])
+
+    def require_project_role(issue, *roles):
+        """404 (not 403) when the user lacks the role in the issue's project, so it stays hidden."""
+        if project_role(g.user, issue["project_id"]) not in roles:
+            raise NotFound("Issue not found.")
 
     def load_issue_for(issue_id):
         issue = db.get_issue(issue_id)
@@ -112,8 +134,12 @@ def create_app():
     def issue_response(issue_id, status=200):
         issue = db.get_issue(issue_id)
         view = view_role_for(issue, g.user)
-        data = to_api(issue, "reporter" if view == "reporter" else g.user["role"])
-        if g.user["role"] == "triage_lead":
+        role = project_role(g.user, issue["project_id"])
+        data = to_api(issue, "reporter" if view == "reporter" else role)
+        project = db.get_project(issue["project_id"])
+        data["project"] = {"slug": project["slug"], "name": project["name"]}
+        data["my_role"] = role
+        if role == "triage_lead":
             data["plan"] = db.latest_plan(issue_id)
         if view == "full":
             p = pipelines.for_issue(issue)
@@ -187,7 +213,13 @@ def create_app():
     @app.get("/api/me")
     @require_roles()
     def me():
-        return jsonify(g.user)
+        if g.user["role"] == "admin":
+            projects = [{"slug": p["slug"], "name": p["name"], "role": "admin"}
+                        for p in db.list_projects(active_only=True)]
+        else:
+            projects = [{"slug": p["slug"], "name": p["name"], "role": g.user["projects"][p["id"]]["role"]}
+                        for p in db.list_projects(active_only=True) if p["id"] in g.user["projects"]]
+        return jsonify({k: v for k, v in g.user.items() if k != "projects"} | {"projects": projects})
 
     @app.get("/api/options")
     @require_roles()
@@ -210,29 +242,45 @@ def create_app():
     @require_roles("reporter", "developer", "triage_lead")
     def create_issue():
         data = validate_issue_input(request.get_json(silent=True))
-        issue_id = service.triage_new(data["title"], data["description"], g.user["id"])
+        slug = body().get("project")
+        member_of = sorted(g.user["projects"])
+        if slug:
+            project = db.get_project_by_slug(str(slug))
+            if not project or project["id"] not in g.user["projects"] or not project["active"]:
+                raise ValidationError("Choose a project you belong to.")
+            project_id = project["id"]
+        elif member_of:
+            project_id = member_of[0]
+        else:
+            raise ValidationError("You are not a member of any project yet. Ask an administrator.")
+        issue_id = service.triage_new(data["title"], data["description"], g.user["id"], project_id=project_id)
         db.audit(g.user["id"], "issue_submitted", issue_id)
         return issue_response(issue_id, 201)
 
     @app.get("/api/issues")
     @require_roles("reporter", "developer", "triage_lead")
     def list_issues():
-        role = g.user["role"]
-        default_scope = {"reporter": "mine", "developer": "assigned", "triage_lead": "all"}[role]
+        roles = effective_roles(g.user)
+        default_scope = ("all" if "triage_lead" in roles else "assigned" if "developer" in roles else "mine")
         scope = request.args.get("scope", default_scope)
-        allowed = {"reporter": {"mine"}, "developer": {"mine", "assigned"},
-                   "triage_lead": {"mine", "all"}}[role]
+        allowed = {"mine"} | ({"all"} if "triage_lead" in roles else set()) \
+            | ({"assigned"} if "developer" in roles else set())
         if scope not in allowed:
             return jsonify(error="Your role cannot view that list."), 403
         status = request.args.get("status") or None
         if status and status not in config.ISSUE_STATUSES:
             raise ValidationError("Unknown status.")
-        rows = db.list_issues(
-            status=status,
-            reporter_id=g.user["id"] if scope == "mine" else None,
-            assignee_id=g.user["id"] if scope == "assigned" else None)
-        shape = "reporter" if scope == "mine" else role
-        return jsonify([to_api(r, shape) for r in sort_queue(rows)])
+        if scope == "all":  # one project's queue, for its triage lead
+            rows = db.list_issues(status=status, project_id=scoped_project("triage_lead")["id"])
+            out = [to_api(r, "triage_lead") for r in sort_queue(rows)]
+        elif scope == "assigned":  # across every project where the user develops
+            rows = [r for r in db.list_issues(status=status, assignee_id=g.user["id"])
+                    if project_role(g.user, r["project_id"]) == "developer"]
+            out = [to_api(r, "developer") for r in sort_queue(rows)]
+        else:
+            out = [to_api(r, "reporter") for r in sort_queue(db.list_issues(status=status,
+                                                                            reporter_id=g.user["id"]))]
+        return jsonify(out)
 
     @app.get("/api/issues/<int:issue_id>")
     @require_roles("reporter", "developer", "triage_lead")
@@ -249,6 +297,7 @@ def create_app():
         issue, _ = load_issue_for(issue_id)
         if not issue:
             return jsonify(error="Issue not found."), 404
+        require_project_role(issue, "triage_lead")
         if issue["status"] != "new":
             raise ValidationError("Only issues awaiting triage can be triaged.")
         data = body()
@@ -269,8 +318,9 @@ def create_app():
                     final[field] = data[field]
         assignee_id = data.get("assignee_id") or (proposed or {}).get("assignee_id")
         dev = db.get_user(assignee_id) if assignee_id else None
-        if not dev or dev["role"] != "developer" or not dev["active"]:
-            raise ValidationError("Choose an active developer to assign.")
+        dev_role = db.memberships(dev["id"]).get(issue["project_id"], {}).get("role") if dev else None
+        if not dev or dev_role != "developer" or not dev["active"]:
+            raise ValidationError("Choose an active developer of this project to assign.")
         comment = data.get("comment")
         if comment is None and proposed:
             comment = proposed_assign_comment(proposed)
@@ -299,6 +349,7 @@ def create_app():
         issue, _ = load_issue_for(issue_id)
         if not issue:
             return jsonify(error="Issue not found."), 404
+        require_project_role(issue, "triage_lead")
         if issue["status"] != "new":
             raise ValidationError("You can only ask for information on issues awaiting triage.")
         message = text_field(body(), "message", 5, "Your question")
@@ -312,6 +363,8 @@ def create_app():
     @require_roles("triage_lead")
     def replan(issue_id):
         issue, _ = load_issue_for(issue_id)
+        if issue:
+            require_project_role(issue, "triage_lead")
         if not issue or issue["status"] != "new":
             raise ValidationError("The agent can only re-plan issues awaiting triage.")
         service.create_plan(issue_id)
@@ -361,15 +414,21 @@ def create_app():
     @app.get("/api/developers")
     @require_roles("triage_lead")
     def developers():
+        project = scoped_project("triage_lead")
         return jsonify([{"id": d["id"], "name": d["display_name"], "modules": d["modules"],
-                         "open_count": d["open_count"]} for d in db.developer_workload()])
+                         "open_count": d["open_count"]} for d in db.developer_workload(project["id"])])
 
     # ---------- insights ----------
 
     @app.get("/api/metrics")
     @require_roles("triage_lead", "admin")
     def metrics():
-        rows = db.list_issues()
+        # A lead sees their project; an administrator sees one project (?project=) or the whole desk.
+        if g.user["role"] == "admin" and not request.args.get("project"):
+            project_id = None
+        else:
+            project_id = scoped_project("triage_lead")["id"]
+        rows = db.list_issues(project_id=project_id)
         reviewed = [r for r in rows if r["review_action"]]
         llm_rows = [r for r in rows if r["ai_source"] == "llm"]
 
@@ -396,12 +455,12 @@ def create_app():
             avg_latency_ms=avg([r["latency_ms"] for r in rows]),
             avg_tokens_in=avg([r["tokens_in"] for r in llm_rows]),
             avg_tokens_out=avg([r["tokens_out"] for r in llm_rows]),
-            agent=agent_metrics(),
-            sync_failures=len(db.failed_syncs()),
+            agent=agent_metrics(project_id),
+            sync_failures=len(db.failed_syncs(project_id)),
         )
 
-    def agent_metrics():
-        plans = db.plan_rows()
+    def agent_metrics(project_id=None):
+        plans = db.plan_rows(project_id)
         decided = [p for p in plans if p["status"] in ("approved", "edited")]
         agent_plans = [p for p in plans if p["source"] == "agent"]
 

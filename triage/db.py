@@ -470,16 +470,23 @@ def update_user(user_id, **fields):
         _sync_default_membership(user_id)
 
 
-def developer_workload():
-    """Active developers with their modules and number of open assigned issues."""
+def developer_workload(project_id=None):
+    """A project's active developers with the modules they own there and their open assignments
+    in that project."""
+    if project_id is None:
+        project_id = default_project_id()
     with connect() as conn:
         rows = conn.execute(
-            """SELECT u.*, (SELECT COUNT(*) FROM issues i
-                            WHERE i.assignee_id = u.id AND i.status = 'assigned') AS open_count
-               FROM users u WHERE u.role = 'developer' AND u.active = 1""").fetchall()
+            """SELECT u.*, m.modules AS project_modules,
+                      (SELECT COUNT(*) FROM issues i WHERE i.assignee_id = u.id
+                       AND i.status = 'assigned' AND i.project_id = m.project_id) AS open_count
+               FROM project_members m JOIN users u ON u.id = m.user_id
+               WHERE m.project_id = ? AND m.role = 'developer' AND u.active = 1""",
+            (project_id,)).fetchall()
     out = []
     for r in rows:
         d = user_to_dict(r)
+        d["modules"] = json.loads(r["project_modules"] or "[]")
         d["open_count"] = r["open_count"]
         out.append(d)
     return out
@@ -533,8 +540,11 @@ def get_issue(issue_id):
         return dict(row) if row else None
 
 
-def list_issues(status=None, reporter_id=None, assignee_id=None):
+def list_issues(status=None, reporter_id=None, assignee_id=None, project_id=None):
     sql, params = ISSUE_SELECT + " WHERE i.is_seed = 0", []
+    if project_id is not None:
+        sql += " AND i.project_id = ?"
+        params.append(project_id)
     if status:
         sql += " AND i.status = ?"
         params.append(status)
@@ -625,13 +635,15 @@ def resolvers_for(issue_ids):
     return out
 
 
-def module_fix_counts(module):
-    """{developer_id: number of resolved issues in this module}."""
+def module_fix_counts(module, project_id=None):
+    """{developer_id: number of resolved issues in this module, within the project}."""
+    if project_id is None:
+        project_id = default_project_id()
     with connect() as conn:
         rows = conn.execute(
             "SELECT resolved_by, COUNT(*) AS n FROM issues WHERE status = 'resolved' AND "
-            "resolved_by IS NOT NULL AND COALESCE(final_module, ai_module) = ? GROUP BY resolved_by",
-            (module,)).fetchall()
+            "resolved_by IS NOT NULL AND COALESCE(final_module, ai_module) = ? AND project_id = ? "
+            "GROUP BY resolved_by", (module, project_id)).fetchall()
     return {r["resolved_by"]: r["n"] for r in rows}
 
 
@@ -672,9 +684,13 @@ def decide_plan(plan_id, status, decision, user_id):
                      (status, json.dumps(decision), user_id, now(), plan_id))
 
 
-def plan_rows():
+def plan_rows(project_id=None):
+    sql, params = "SELECT * FROM agent_plans", []
+    if project_id is not None:
+        sql += " WHERE project_id = ?"
+        params.append(project_id)
     with connect() as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM agent_plans")]
+        return [dict(r) for r in conn.execute(sql, params)]
 
 
 # ---------- sync log ----------
