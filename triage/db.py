@@ -765,9 +765,18 @@ def audit(user_id, action, issue_id=None, detail=None):
                      (user_id, action, issue_id, json.dumps(detail) if detail else None, now(), issue_id))
 
 
-def audit_entries(limit=100):
+def audit_entries(limit=100, project_id=None):
+    """Newest first. With a project: entries about its issues, plus project administration
+    entries that name it (their project slug is in the detail)."""
+    where, params = "", []
+    if project_id is not None:
+        slug = (get_project(project_id) or {}).get("slug", "")
+        where = " WHERE l.project_id = ? OR l.detail LIKE ?"
+        params = [project_id, f'%"project": "{slug}"%']
     with connect() as conn:
         rows = conn.execute(
-            """SELECT l.*, u.display_name AS user_name, u.role AS user_role FROM audit_log l
-               LEFT JOIN users u ON u.id = l.user_id ORDER BY l.id DESC LIMIT ?""", (limit,))
+            f"""SELECT l.*, u.display_name AS user_name, u.role AS user_role, p.slug AS project_slug
+                FROM audit_log l LEFT JOIN users u ON u.id = l.user_id
+                LEFT JOIN projects p ON p.id = l.project_id{where} ORDER BY l.id DESC LIMIT ?""",
+            params + [limit])
         return [dict(r) for r in rows]

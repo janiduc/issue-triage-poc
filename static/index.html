@@ -217,9 +217,11 @@ async function startApp(user) {
   const saved = recalled();
   state.project = (projects.find((p) => p.slug === saved) || projects[0] || {}).slug || null;
   const sw = $("#proj-switch");
-  sw.innerHTML = projects.map((p) => `<option value="${esc(p.slug)}" ${p.slug === state.project ? "selected" : ""}>${esc(p.name)}</option>`).join("");
-  sw.hidden = $("#proj-label").hidden = projects.length < 2;
-  sw.onchange = () => { state.project = sw.value; remember(sw.value); state.status = "new"; buildNav(); };
+  if (user.role === "admin" && saved === "") state.project = null;  // remembered "All projects"
+  sw.innerHTML = (user.role === "admin" ? `<option value="" ${state.project ? "" : "selected"}>All projects</option>` : "")
+    + projects.map((p) => `<option value="${esc(p.slug)}" ${p.slug === state.project ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+  sw.hidden = $("#proj-label").hidden = projects.length < 2 && user.role !== "admin";
+  sw.onchange = () => { state.project = sw.value || null; remember(sw.value); state.status = "new"; buildNav(); };
   buildNav();
 }
 
@@ -794,11 +796,11 @@ async function viewSettings() {
 
 async function viewAudit() {
   $("#view").innerHTML = `<section><h2>Activity log</h2>
-    <p class="hint">Who did what and when. Issue text is not stored here.</p>
+    <p class="hint">Who did what and when${state.project ? " in the selected project" : " across all projects"}. Issue text is not stored here.</p>
     <div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Issue</th><th>Details</th></tr></thead>
     <tbody id="audit"></tbody></table></div></section>`;
   try {
-    const rows = await api("/api/admin/audit?limit=200");
+    const rows = await api(withProject("/api/admin/audit?limit=200"));
     $("#audit").innerHTML = rows.length ? rows.map((r) => `<tr><td>${when(r.at)}</td>
       <td>${esc(r.user_name || "unknown")}${r.user_role ? `<div class="hint">${esc(state.options.role_labels[r.user_role])}</div>` : ""}</td>
       <td>${nice(r.action)}</td><td>${r.issue_id ? "#" + r.issue_id : ""}</td>

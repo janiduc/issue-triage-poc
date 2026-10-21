@@ -592,7 +592,11 @@ def create_app():
         except ValueError:
             raise ValidationError("limit must be a whole number.")
         limit = max(1, min(limit, 500))
-        return jsonify(db.audit_entries(limit))
+        slug = request.args.get("project")
+        project = db.get_project_by_slug(slug) if slug else None
+        if slug and not project:
+            raise NotFound("Project not found.")
+        return jsonify(db.audit_entries(limit, project["id"] if project else None))
 
     # ---------- projects (administrator) ----------
 

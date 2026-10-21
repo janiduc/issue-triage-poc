@@ -437,3 +437,17 @@ class ProjectAITests(Base):
         self.as_user("admin").patch("/api/admin/projects/booking", json={"share_seed": True})
         shared = self.submit_in("booking", "Discount code error", text)
         self.assertTrue(shared["similar_issues"])
+
+
+class ProjectLogTests(Base):
+    # PL8: the activity log can be read for one project
+    def test_pl8_audit_filtered_by_project(self):
+        admin = self.as_user("admin")
+        admin.post("/api/admin/projects", json={"slug": "booking", "name": "Booking API", "tracker": "none"})
+        self.submit(self.as_user("lead"), "Checkout error", "Checkout fails with an error for everyone.")
+        booking = [e["action"] for e in admin.get("/api/admin/audit?project=booking").get_json()]
+        first = [e["action"] for e in admin.get("/api/admin/audit?project=simulated").get_json()]
+        self.assertEqual(booking, ["project_created"])
+        self.assertIn("issue_submitted", first)
+        self.assertNotIn("project_created", first)
+        self.assertEqual(admin.get("/api/admin/audit?project=nope").status_code, 404)
